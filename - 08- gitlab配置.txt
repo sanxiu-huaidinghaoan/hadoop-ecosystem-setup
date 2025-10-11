@@ -1,0 +1,643 @@
+# =============================================
+# GitLab 高可用集群配置指南（生产监控优化版）
+# =============================================
+
+# 架构设计 - 监控优化版
+# =============================================
+
+节点角色分配：
+- node-master:   GitLab主应用 + PostgreSQL主库 + Redis主节点 + 监控节点
+- node-slave1:   GitLab备应用 + PostgreSQL从库 + Redis从节点 + 监控节点  
+- node-slave2:   GitLab备应用 + PgBouncer连接池 + NFS存储 + Keepalived主节点
+
+端口规划：
+- GitLab Web: 18000 | GitLab SSH: 2222 | PostgreSQL: 5433 | Redis: 6380
+- PgBouncer: 6432 | Keepalived VIP: 192.168.100.100
+- 监控端口: Node Exporter: 9100 | GitLab服务发现端口: 18000
+
+# 第一阶段：系统准备和资源检查
+# =============================================
+
+echo "=== 系统资源检查和GitLab专用端口检查 ==="
+free -h
+df -h  
+nproc
+
+echo "=== 检查GitLab相关端口占用情况 ==="
+PORTS=(18000 2222 5433 6380 6432)
+for port in "${PORTS[@]}"; do
+    result=$(sudo netstat -tlnp | grep ":$port " || echo "端口 $port 可用")
+    echo "$result"
+done
+
+echo "=== 检查系统关键资源使用情况 ==="
+ps aux --sort=-%mem | head -5
+echo "=== 内存使用前5的进程 ==="
+
+# 第二阶段：GitLab 安装（所有节点）
+# =============================================
+
+## 1. 安装 GitLab
+curl -s https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh | sudo bash
+sudo apt-get install gitlab-ce -y
+echo "GitLab安装完成"
+
+## 2. 检查版本信息
+sudo gitlab-rake gitlab:env:info
+cat /opt/gitlab/embedded/service/gitlab-rails/VERSION
+
+# 第三阶段：GitLab 配置（监控优化版）
+# =============================================
+
+## 1. node-master 配置（主节点）- 监控优化
+cat > /tmp/gitlab_master_monitor.rb << 'EOF'
+# ==================== 基础应用配置 ====================
+external_url 'http://192.168.100.101:18000'
+gitlab_rails['auto_migrate'] = false
+gitlab_rails['enable'] = true
+gitlab_rails['gitlab_shell_ssh_port'] = 2222
+
+# ==================== PostgreSQL 主库配置 ====================
+postgresql['enable'] = true
+postgresql['listen_address'] = '0.0.0.0'
+postgresql['port'] = 5433
+postgresql['sql_replication_password'] = "asdfghjkl;'"
+postgresql['sql_user_password'] = "asdfghjkl;'"
+postgresql['max_connections'] = 200
+postgresql['shared_buffers'] = "256MB"
+postgresql['wal_level'] = 'replica'
+postgresql['max_wal_senders'] = 3
+postgresql['wal_keep_segments'] = 10
+
+# ==================== Redis 主节点配置 ====================
+redis['enable'] = true
+redis['bind'] = '0.0.0.0'
+redis['port'] = 6380
+redis['password'] = "asdfghjkl;'"
+redis['maxmemory'] = "512mb"
+redis['maxmemory_policy'] = "allkeys-lru"
+
+# ==================== 监控配置优化 ====================
+# 完全禁用内置监控，使用独立监控系统
+prometheus['enable'] = false
+grafana['enable'] = false
+node_exporter['enable'] = false
+redis_exporter['enable'] = false
+postgres_exporter['enable'] = false
+
+# 启用服务状态端点，供外部监控系统使用
+gitlab_rails['metrics_enabled'] = true
+gitlab_rails['metrics_host'] = '0.0.0.0'
+gitlab_rails['metrics_port'] = 8083
+
+# ==================== 资源限制 ====================
+unicorn['worker_processes'] = 2
+sidekiq['max_concurrency'] = 8
+puma['worker_processes'] = 2
+
+# ==================== 数据库连接配置 ====================
+gitlab_rails['db_host'] = '/var/opt/gitlab/postgresql'
+gitlab_rails['db_port'] = 5433
+gitlab_rails['db_username'] = 'gitlab'
+gitlab_rails['db_password'] = "asdfghjkl;'"
+gitlab_rails['db_database'] = 'gitlabhq_production'
+gitlab_rails['db_adapter'] = 'postgresql'
+
+gitlab_rails['redis_host'] = '127.0.0.1'
+gitlab_rails['redis_port'] = 6380
+gitlab_rails['redis_password'] = "asdfghjkl;'"
+
+# ==================== 生产优化配置 ====================
+# 日志配置
+gitlab_rails['log_level'] = 'info'
+gitlab_rails['log_format'] = 'json'
+
+# 备份配置
+gitlab_rails['backup_path'] = "/var/opt/gitlab/backups"
+gitlab_rails['backup_keep_time'] = 604800
+
+# 性能优化
+gitlab_rails['gitlab_default_can_create_group'] = true
+gitlab_rails['gitlab_default_projects_limit'] = 100
+gitlab_rails['gitlab_timeout'] = 60
+EOF
+
+sudo cp /tmp/gitlab_master_monitor.rb /etc/gitlab/gitlab.rb
+
+## 2. node-slave1 配置（从节点）- 监控优化
+cat > /tmp/gitlab_slave1_monitor.rb << 'EOF'
+# ==================== 基础应用配置 ====================
+external_url 'http://192.168.100.102:18000'
+gitlab_rails['auto_migrate'] = false
+gitlab_rails['enable'] = true
+gitlab_rails['gitlab_shell_ssh_port'] = 2222
+
+# ==================== PostgreSQL 从库配置 ====================
+postgresql['enable'] = true
+postgresql['listen_address'] = '0.0.0.0'
+postgresql['port'] = 5433
+postgresql['sql_replication_password'] = "asdfghjkl;'"
+postgresql['sql_user_password'] = "asdfghjkl;'"
+postgresql['master_ip'] = '192.168.100.101'
+postgresql['master_port'] = 5433
+postgresql['standby'] = 'on'
+postgresql['wal_level'] = 'replica'
+postgresql['max_wal_senders'] = 3
+postgresql['hot_standby'] = 'on'
+
+# ==================== Redis 从节点配置 ====================
+redis['enable'] = true
+redis['bind'] = '0.0.0.0'
+redis['port'] = 6380
+redis['password'] = "asdfghjkl;'"
+redis['master'] = false
+redis['master_ip'] = '192.168.100.101'
+redis['master_port'] = 6380
+redis['master_password'] = "asdfghjkl;'"
+
+# ==================== 监控配置优化 ====================
+prometheus['enable'] = false
+grafana['enable'] = false
+node_exporter['enable'] = false
+
+gitlab_rails['metrics_enabled'] = true
+gitlab_rails['metrics_host'] = '0.0.0.0'
+gitlab_rails['metrics_port'] = 8083
+
+# ==================== 资源限制 ====================
+unicorn['worker_processes'] = 2
+sidekiq['max_concurrency'] = 8
+puma['worker_processes'] = 2
+
+# ==================== 数据库连接配置 ====================
+gitlab_rails['db_host'] = '/var/opt/gitlab/postgresql'
+gitlab_rails['db_port'] = 5433
+gitlab_rails['db_username'] = 'gitlab'
+gitlab_rails['db_password'] = "asdfghjkl;'"
+gitlab_rails['db_database'] = 'gitlabhq_production'
+gitlab_rails['db_adapter'] = 'postgresql'
+
+gitlab_rails['redis_host'] = '127.0.0.1'
+gitlab_rails['redis_port'] = 6380
+gitlab_rails['redis_password'] = "asdfghjkl;'"
+EOF
+
+sudo cp /tmp/gitlab_slave1_monitor.rb /etc/gitlab/gitlab.rb
+
+## 3. node-slave2 配置（负载均衡节点）- 监控优化
+cat > /tmp/gitlab_slave2_monitor.rb << 'EOF'
+# ==================== 基础应用配置 ====================
+external_url 'http://192.168.100.103:18000'
+gitlab_rails['auto_migrate'] = false
+gitlab_rails['enable'] = true
+gitlab_rails['gitlab_shell_ssh_port'] = 2222
+
+# ==================== 数据库服务配置 ====================
+postgresql['enable'] = false
+redis['enable'] = false
+
+# ==================== PgBouncer 连接池配置 ====================
+pgbouncer['enable'] = true
+pgbouncer['port'] = 6432
+pgbouncer['databases'] = {
+  'gitlabhq_production' => {
+    'host' => '192.168.100.101',
+    'port' => 5433,
+    'user' => 'gitlab',
+    'password' => "asdfghjkl;'"
+  }
+}
+
+# ==================== 监控配置优化 ====================
+prometheus['enable'] = false
+grafana['enable'] = false
+node_exporter['enable'] = false
+
+gitlab_rails['metrics_enabled'] = true
+gitlab_rails['metrics_host'] = '0.0.0.0'
+gitlab_rails['metrics_port'] = 8083
+
+# ==================== 资源限制 ====================
+unicorn['worker_processes'] = 2
+sidekiq['max_concurrency'] = 8
+puma['worker_processes'] = 2
+
+# ==================== 数据库连接配置 ====================
+gitlab_rails['db_host'] = 'localhost'
+gitlab_rails['db_port'] = 6432
+gitlab_rails['db_username'] = 'gitlab'
+gitlab_rails['db_password'] = "asdfghjkl;'"
+gitlab_rails['db_database'] = 'gitlabhq_production'
+gitlab_rails['db_adapter'] = 'postgresql'
+
+gitlab_rails['redis_host'] = '192.168.100.101'
+gitlab_rails['redis_port'] = 6380
+gitlab_rails['redis_password'] = "asdfghjkl;'"
+EOF
+
+sudo cp /tmp/gitlab_slave2_monitor.rb /etc/gitlab/gitlab.rb
+
+# 分发配置到其他节点
+scp /tmp/gitlab_slave1_monitor.rb asked@node-slave1:/tmp/
+scp /tmp/gitlab_slave2_monitor.rb asked@node-slave2:/tmp/
+
+ssh asked@node-slave1 "sudo cp /tmp/gitlab_slave1_monitor.rb /etc/gitlab/gitlab.rb"
+ssh asked@node-slave2 "sudo cp /tmp/gitlab_slave2_monitor.rb /etc/gitlab/gitlab.rb"
+
+# 第四阶段：NFS 共享存储配置
+# =============================================
+
+## 1. 在 node-slave2 上配置 NFS 服务器
+sudo apt-get install -y nfs-kernel-server
+sudo mkdir -p /srv/gitlab-data
+sudo chown -R git:git /srv/gitlab-data
+
+# 配置 NFS 共享
+echo "/srv/gitlab-data 192.168.100.101(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
+echo "/srv/gitlab-data 192.168.100.102(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
+echo "/srv/gitlab-data 192.168.100.103(rw,sync,no_subtree_check,no_root_squash)" | sudo tee -a /etc/exports
+
+sudo systemctl enable nfs-kernel-server
+sudo systemctl start nfs-kernel-server
+sudo exportfs -v
+
+## 2. 在其余所有节点挂载 NFS
+for node in node-master node-slave1; do
+    ssh asked@$node "sudo apt-get install -y nfs-common"
+    ssh asked@$node "sudo mkdir -p /var/opt/gitlab/git-data"
+    ssh asked@$node "sudo mount -t nfs 192.168.100.103:/srv/gitlab-data /var/opt/gitlab/git-data"
+    ssh asked@$node "echo '192.168.100.103:/srv/gitlab-data /var/opt/gitlab/git-data nfs defaults 0 0' | sudo tee -a /etc/fstab"
+done
+
+# 第五阶段：配置 PostgreSQL 主从复制
+# =============================================
+
+## 1. 在主节点配置复制权限
+ssh asked@192.168.100.101 "echo 'host replication gitlab_replication 192.168.100.102/32 md5' | sudo tee -a /var/opt/gitlab/postgresql/data/pg_hba.conf"
+ssh asked@192.168.100.101 "sudo gitlab-ctl restart postgresql"
+
+## 2. 在从节点初始化数据同步
+ssh asked@192.168.100.102 "sudo gitlab-ctl stop postgresql"
+ssh asked@192.168.100.102 "sudo rm -rf /var/opt/gitlab/postgresql/data/*"
+ssh asked@192.168.100.102 "sudo -u gitlab-psql /opt/gitlab/embedded/bin/pg_basebackup -h 192.168.100.101 -p 5433 -D /var/opt/gitlab/postgresql/data/ -U gitlab_replication -P -R -X stream"
+ssh asked@192.168.100.102 "sudo gitlab-ctl start postgresql"
+
+# 第六阶段：配置 Keepalived（高可用核心）
+# =============================================
+
+## 1. 在所有节点安装 Keepalived
+sudo apt-get install -y keepalived
+
+## 2. node-slave2 配置（主负载均衡器）
+cat > /tmp/keepalived_master.conf << 'EOF'
+vrrp_instance VI_1 {
+    state MASTER
+    interface ens33
+    virtual_router_id 52
+    priority 150
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass gitlab_keepalived_123
+    }
+    virtual_ipaddress {
+        192.168.100.100/24
+    }
+    track_script {
+        chk_gitlab
+    }
+}
+
+vrrp_script chk_gitlab {
+    script "/usr/bin/systemctl is-active gitlab-runsvdir"
+    interval 2
+    weight 50
+    fall 2
+    rise 2
+    timeout 5
+}
+EOF
+
+sudo cp /tmp/keepalived_master.conf /etc/keepalived/keepalived.conf
+
+## 3. 其他节点配置（备用）
+cat > /tmp/keepalived_backup.conf << 'EOF'
+vrrp_instance VI_1 {
+    state BACKUP
+    interface ens33
+    virtual_router_id 52
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass gitlab_keepalived_123
+    }
+    virtual_ipaddress {
+        192.168.100.100/24
+    }
+    track_script {
+        chk_gitlab
+    }
+}
+
+vrrp_script chk_gitlab {
+    script "/usr/bin/systemctl is-active gitlab-runsvdir"
+    interval 2
+    weight 50
+    fall 2
+    rise 2
+    timeout 5
+}
+EOF
+
+# 在 node-master 和 node-slave1 上复制备用配置
+ssh asked@node-master "sudo cp /tmp/keepalived_backup.conf /etc/keepalived/keepalived.conf"
+ssh asked@node-slave1 "sudo cp /tmp/keepalived_backup.conf /etc/keepalived/keepalived.conf"
+
+# 启动 Keepalived
+for node in node-master node-slave1 node-slave2; do
+    ssh asked@$node "sudo systemctl enable keepalived"
+    ssh asked@$node "sudo systemctl start keepalived"
+    ssh asked@$node "sudo systemctl status keepalived --no-pager"
+done
+
+# 第七阶段：分阶段启动 GitLab 集群
+# =============================================
+
+cat > start_gitlab_cluster.sh << 'EOF'
+#!/bin/bash
+echo "=== GitLab 集群分阶段启动 ==="
+
+echo "=== 阶段1: 启动主节点 ==="
+ssh asked@192.168.100.101 "sudo gitlab-ctl reconfigure"
+echo "等待主节点数据库初始化..."
+sleep 180
+
+echo "=== 阶段2: 启动从节点1 ==="
+ssh asked@192.168.100.102 "sudo gitlab-ctl reconfigure"
+echo "等待从节点同步数据..."
+sleep 120
+
+echo "=== 阶段3: 启动负载均衡节点 ==="
+ssh asked@192.168.100.103 "sudo gitlab-ctl reconfigure"
+sleep 60
+
+echo "=== 阶段4: 最终检查 ==="
+for node in 192.168.100.101 192.168.100.102 192.168.100.103; do
+    echo "检查 $node 服务状态:"
+    ssh asked@$node "sudo gitlab-ctl status | grep -E 'run|down'"
+done
+
+echo "=== GitLab 集群启动完成 ==="
+EOF
+
+chmod +x start_gitlab_cluster.sh
+
+# 第八阶段：防火墙和监控配置
+# =============================================
+
+## 1. GitLab服务防火墙
+for node in node-master node-slave1 node-slave2; do
+    ssh asked@$node "sudo ufw allow 18000/tcp comment 'GitLab Web'"
+    ssh asked@$node "sudo ufw allow 2222/tcp comment 'GitLab SSH'"
+    ssh asked@$node "sudo ufw allow 5433/tcp comment 'GitLab PostgreSQL'"
+    ssh asked@$node "sudo ufw allow 6380/tcp comment 'GitLab Redis'"
+    ssh asked@$node "sudo ufw allow 6432/tcp comment 'PgBouncer'"
+    ssh asked@$node "sudo ufw allow 8083/tcp comment 'GitLab Metrics'"
+    ssh asked@$node "sudo ufw allow from 192.168.100.0/24 to any port 5433"
+    ssh asked@$node "sudo ufw allow from 192.168.100.0/24 to any port 6380"
+done
+
+## 2. 为独立监控系统开放访问
+echo "=== 配置监控系统访问权限 ==="
+for node in node-master node-slave1 node-slave2; do
+    ssh asked@$node "sudo ufw allow from 192.168.100.101 to any port 9100 comment 'Node Exporter from Prometheus'"
+    ssh asked@$node "sudo ufw allow from 192.168.100.101 to any port 8083 comment 'GitLab Metrics from Prometheus'"
+done
+
+# 第九阶段：集成独立监控系统
+# =============================================
+
+## 1. 创建 Prometheus GitLab 监控配置
+cat > /tmp/gitlab_monitoring.yml << 'EOF'
+# GitLab 监控配置 - 集成到独立监控系统
+
+# Node Exporter 系统监控（已在监控系统配置）
+
+# GitLab 服务监控
+- job_name: 'gitlab-services'
+  static_configs:
+    - targets:
+        - 'node-master:18000'
+        - 'node-slave1:18000'
+        - 'node-slave2:18000'
+  metrics_path: '/-/metrics'
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  params:
+    token: ['your_metrics_token_here']
+  relabel_configs:
+    - source_labels: [__address__]
+      target_label: __param_target
+    - source_labels: [__param_target]
+      target_label: instance
+    - target_label: __address__
+      replacement: 192.168.100.101:9090  # Prometheus 地址
+
+# GitLab 服务健康检查
+- job_name: 'gitlab-health'
+  static_configs:
+    - targets:
+        - 'node-master:18000'
+        - 'node-slave1:18000'
+        - 'node-slave2:18000'
+  metrics_path: '/-/readiness'
+  scrape_interval: 15s
+  scrape_timeout: 5s
+
+# PostgreSQL 监控
+- job_name: 'gitlab-postgresql'
+  static_configs:
+    - targets:
+        - 'node-master:5433'
+        - 'node-slave1:5433'
+  scrape_interval: 30s
+  scrape_timeout: 10s
+
+# Redis 监控
+- job_name: 'gitlab-redis'
+  static_configs:
+    - targets:
+        - 'node-master:6380'
+        - 'node-slave1:6380'
+  scrape_interval: 30s
+  scrape_timeout: 10s
+EOF
+
+echo "GitLab监控配置已保存到 /tmp/gitlab_monitoring.yml"
+echo "请将此配置集成到您的独立Prometheus监控系统中"
+
+## 2. 创建监控告警规则
+cat > /tmp/gitlab_alerts.yml << 'EOF'
+groups:
+  - name: gitlab_alerts
+    rules:
+      # GitLab 服务宕机告警
+      - alert: GitLabServiceDown
+        expr: up{job="gitlab-services"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          cluster: gitlab-cluster
+        annotations:
+          summary: "GitLab 服务 {{ $labels.instance }} 宕机"
+          description: "GitLab 服务 {{ $labels.instance }} 已经超过2分钟无法访问"
+
+      # GitLab 健康状态告警
+      - alert: GitLabUnhealthy
+        expr: gitlab_health_status != 1
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GitLab 服务 {{ $labels.instance }} 健康状态异常"
+          description: "GitLab 健康检查失败，当前状态: {{ $value }}"
+
+      # PostgreSQL 连接数告警
+      - alert: PostgreSQLHighConnections
+        expr: pg_stat_database_numbackends{datname="gitlabhq_production"} > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL 连接数过高"
+          description: "GitLab数据库连接数超过50，当前值: {{ $value }}"
+
+      # Redis 内存使用告警
+      - alert: RedisHighMemory
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis 内存使用率过高"
+          description: "Redis内存使用率超过80%，当前值: {{ $value | humanizePercentage }}"
+
+      # NFS 挂载状态告警
+      - alert: NFSMountFailed
+        expr: node_filesystem_device_error{mountpoint="/var/opt/gitlab/git-data"} == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NFS 存储挂载失败"
+          description: "GitLab共享存储挂载异常，请立即检查"
+
+      # VIP 故障转移告警
+      - alert: VIPFailover
+        expr: changes(keepalived_vrrp_state{instance=~"node-slave.*"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "VIP 发生故障转移"
+          description: "GitLab虚拟IP已从 {{ $labels.instance }} 转移"
+EOF
+
+echo "GitLab告警规则已保存到 /tmp/gitlab_alerts.yml"
+
+# 第十阶段：验证与测试
+# =============================================
+
+cat > gitlab_health_check.sh << 'EOF'
+#!/bin/bash
+echo "=== GitLab 集群健康检查 ==="
+
+echo "1. 虚拟IP状态:"
+for node in 192.168.100.101 192.168.100.102 192.168.100.103; do
+    echo -n "$node: "
+    ssh asked@$node "ip addr show ens33 2>/dev/null | grep 192.168.100.100 || echo '未持有VIP'"
+done
+
+echo "2. GitLab服务状态:"
+for node in 192.168.100.101 192.168.100.102 192.168.100.103; do
+    echo "=== $node ==="
+    ssh asked@$node "sudo gitlab-ctl status | grep -E 'run|down'"
+done
+
+echo "3. PostgreSQL 复制状态:"
+echo "主库复制状态:"
+ssh asked@192.168.100.101 "sudo -u gitlab-psql /opt/gitlab/embedded/bin/psql -h localhost -p 5433 -d gitlabhq_production -c 'SELECT client_addr, state, sync_state FROM pg_stat_replication;'"
+
+echo "从库状态:"
+ssh asked@192.168.100.102 "sudo -u gitlab-psql /opt/gitlab/embedded/bin/psql -h localhost -p 5433 -d gitlabhq_production -c 'SELECT pg_is_in_recovery();'"
+
+echo "4. Redis 复制状态:"
+echo "主Redis:"
+ssh asked@192.168.100.101 "echo 'INFO replication' | sudo /opt/gitlab/embedded/bin/redis-cli -a 'asdfghjkl;''' -p 6380 | grep role"
+echo "从Redis:"
+ssh asked@192.168.100.102 "echo 'INFO replication' | sudo /opt/gitlab/embedded/bin/redis-cli -a 'asdfghjkl;''' -p 6380 | grep role"
+
+echo "5. PgBouncer 连接测试:"
+ssh asked@192.168.100.103 "sudo -u gitlab-psql /opt/gitlab/embedded/bin/psql -h localhost -p 6432 -d gitlabhq_production -c 'SELECT 1 AS pgbouncer_ok;'"
+
+echo "6. NFS 挂载检查:"
+for node in 192.168.100.101 192.168.100.102 192.168.100.103; do
+    echo "=== $node NFS ==="
+    ssh asked@$node "df -h | grep gitlab-data || echo 'NFS未挂载'"
+done
+
+echo "7. 监控集成检查:"
+echo "Node Exporter状态:"
+for node in 192.168.100.101 192.168.100.102 192.168.100.103; do
+    status=$(curl -s -o /dev/null -w "%{http_code}" http://$node:9100/metrics)
+    echo "  $node: $status"
+done
+
+echo "8. 访问测试:"
+echo "虚拟IP访问:"
+curl -s -o /dev/null -w "VIP响应码: %{http_code}\n" http://192.168.100.100:18000
+echo "直接节点访问:"
+for node in 192.168.100.101 192.168.100.102 192.168.100.103; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" http://$node:18000)
+    echo "  $node: $code"
+done
+
+echo "9. Keepalived状态检查:"
+for node in 192.168.100.101 192.168.100.102 192.168.100.103; do
+    echo "=== $node ==="
+    ssh asked@$node "sudo systemctl status keepalived --no-pager | grep -E 'Active:|State:'"
+done
+
+echo "=== 健康检查完成 ==="
+EOF
+
+chmod +x gitlab_health_check.sh
+
+echo "=== GitLab 高可用集群部署完成 ==="
+echo ""
+echo "📱 访问信息:"
+echo "主入口 (虚拟IP): http://192.168.100.100:18000"
+echo "各节点访问:"
+echo "  http://192.168.100.101:18000 (主节点)"
+echo "  http://192.168.100.102:18000 (从节点1)" 
+echo "  http://192.168.100.103:18000 (负载均衡节点)"
+echo ""
+echo "🔧 管理命令:"
+echo "启动集群: ./start_gitlab_cluster.sh"
+echo "健康检查: ./gitlab_health_check.sh"
+echo "查看初始密码: sudo cat /etc/gitlab/initial_root_password"
+echo ""
+echo "📊 监控集成:"
+echo "监控配置: /tmp/gitlab_monitoring.yml"
+echo "告警规则: /tmp/gitlab_alerts.yml"
+echo "请将上述文件集成到您的独立监控系统中"
+echo ""
+echo "💡 高可用特性:"
+echo "✓ 自动故障转移 (Keepalived VIP)"
+echo "✓ 数据库复制 (PostgreSQL Streaming Replication)"
+echo "✓ Redis主从同步 (端口6380)"
+echo "✓ 共享存储 (NFS)"
+echo "✓ 连接池 (PgBouncer)"
+echo "✓ 独立监控系统集成"
+echo "✓ 生产级资源优化"

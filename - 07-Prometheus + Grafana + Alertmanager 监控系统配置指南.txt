@@ -1,0 +1,1042 @@
+[file name]: Prometheus + Grafana + Alertmanager 监控系统配置指南.txt
+[file content begin]
+[File creator 槐鼎昊安]
+
+=============================================
+Prometheus + Grafana + Alertmanager 完整监控指南
+三节点大数据集群监控方案
+=============================================
+
+📋 部署前提条件
+在开始部署监控系统之前，请确保以下服务已正常运行：
+✓ Hadoop集群 (03号文档完成)
+✓ HBase + Kafka集群 (05号文档完成) 
+✓ Spark集群 (06号文档完成)
+✓ 所有服务端口可访问
+✓ 防火墙规则已配置
+✓ 节点间网络通畅
+
+📋 监控架构概览
+Prometheus (指标收集) + Grafana (可视化) + Alertmanager (告警)
+        ↑
+    Node Exporter (系统指标)
+    Hadoop Exporter (HDFS/YARN指标)  
+    HBase Exporter (HBase指标)
+    Kafka Exporter (Kafka指标)
+
+第一阶段：基础监控组件安装（所有节点）
+============================================
+
+1. 安装 Node Exporter 1.8.2（所有节点）
+
+# 在所有节点执行：node-master, node-slave1, node-slave2
+
+# 下载 Node Exporter 1.8.2
+cd /tmp
+wget https://github.com/prometheus/node_exporter/releases/download/v1.8.2/node_exporter-1.8.2.linux-amd64.tar.gz
+
+# 解压安装
+sudo tar -xzf node_exporter-1.8.2.linux-amd64.tar.gz -C /usr/local/
+sudo mv /usr/local/node_exporter-1.8.2.linux-amd64 /usr/local/node_exporter
+sudo chown -R asked:asked /usr/local/node_exporter
+
+# 创建系统服务
+sudo nano /etc/systemd/system/node_exporter.service
+
+# node_exporter.service 内容：
+[Unit]
+Description=Node Exporter 1.8.2
+Documentation=https://prometheus.io/docs/guides/node-exporter/
+After=network.target
+
+[Service]
+User=asked
+Group=asked
+Type=simple
+ExecStart=/usr/local/node_exporter/node_exporter \
+  --web.listen-address=:9100 \
+  --path.rootfs=/ \
+  --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/) \
+  --collector.textfile.directory=/var/lib/node_exporter/textfile_collector
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+# 启动服务：
+sudo systemctl daemon-reload
+sudo systemctl enable node_exporter
+sudo systemctl start node_exporter
+sudo systemctl status node_exporter
+
+# 验证
+curl http://localhost:9100/metrics | head -20
+
+2. 配置防火墙（所有节点）
+
+sudo ufw allow 9100/tcp comment "Node Exporter"
+sudo ufw status
+
+第二阶段：Prometheus 3.5.0 安装配置（master节点）
+============================================
+
+# 检查服务器架构
+uname -m
+# 或者使用更详细的方法
+arch
+lscpu | grep Architecture
+# 检查 CPU 信息
+cat /proc/cpuinfo | grep model name | head -1
+
+1. 安装 Prometheus 3.5.0
+
+# 在 master 节点执行
+cd /tmp
+# 下载 Prometheus 3.5.0 版本
+wget https://github.com/prometheus/prometheus/releases/download/v3.5.0/prometheus-3.5.0.linux-amd64.tar.gz
+
+# 清华大学镜像
+wget https://mirrors.tuna.tsinghua.edu.cn/github-release/prometheus/prometheus/LatestRelease/prometheus-3.5.0.linux-amd64.tar.gz
+
+# 或者中科大镜像
+wget https://mirrors.ustc.edu.cn/github-release/prometheus/prometheus/LatestRelease/prometheus-3.5.0.linux-amd64.tar.gz
+
+# 尝试使用 ghproxy.com 代理
+wget https://ghproxy.com/https://github.com/prometheus/prometheus/releases/download/v3.5.0/prometheus-3.5.0.linux-amd64.tar.gz
+
+# 或者使用 fastgit.org 镜像
+wget https://download.fastgit.org/prometheus/prometheus/releases/download/v3.5.0/prometheus-3.5.0.linux-amd64.tar.gz
+
+# 检查当前目录内容
+ls -la /tmp | grep prometheus
+# 清理可能损坏的下载文件
+rm -f prometheus-*.tar.gz
+
+# 回到 /tmp 目录
+cd /tmp
+
+# 正确解压安装
+sudo tar -xzf prometheus-3.5.0.linux-amd64.tar.gz -C /usr/local/
+sudo mv /usr/local/prometheus-3.5.0.linux-amd64 /usr/local/prometheus
+sudo chown -R asked:asked /usr/local/prometheus
+
+# 创建数据目录
+sudo mkdir -p /usr/local/prometheus/data
+sudo mkdir -p /usr/local/prometheus/rules
+sudo mkdir -p /usr/local/prometheus/targets
+sudo chown -R asked:asked /usr/local/prometheus
+
+# 验证安装
+ls -la /usr/local/prometheus/
+/usr/local/prometheus/prometheus --version
+
+2. 配置 Prometheus
+cd /usr/local/prometheus
+nano prometheus.yml
+
+# 删除文件内容后添加
+# prometheus.yml 完整配置：
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'hadoop-cluster'
+    environment: 'production'
+
+# 告警规则文件
+rule_files:
+  - "rules/*.yml"
+
+# 告警管理器配置
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - localhost:9093
+
+# 抓取配置
+scrape_configs:
+  # Prometheus 自身监控 - 新增自监控
+  - job_name: 'prometheus-self'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 30s
+    metrics_path: /metrics
+
+  # 节点监控
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: 
+          - 'node-master:9100'
+          - 'node-slave1:9100' 
+          - 'node-slave2:9100'
+    scrape_interval: 15s
+    metrics_path: /metrics
+
+  # Hadoop HDFS 监控
+  - job_name: 'hadoop-hdfs'
+    static_configs:
+      - targets: ['node-master:9870']
+    scrape_interval: 30s
+    metrics_path: /jmx
+    params:
+      qry: ['Hadoop:service=NameNode,name=*']
+
+  # Hadoop YARN 监控  
+  - job_name: 'hadoop-yarn'
+    static_configs:
+      - targets: ['node-master:8088']
+    scrape_interval: 30s
+    metrics_path: /jmx
+    params:
+      qry: ['Hadoop:service=ResourceManager,name=*']
+
+  # HBase 监控
+  - job_name: 'hbase-master'
+    static_configs:
+      - targets: ['node-master:16010']
+    scrape_interval: 30s
+    metrics_path: /jmx
+    params:
+      qry: ['Hadoop:service=HBase,name=Master*']
+
+  - job_name: 'hbase-regionserver'
+    static_configs:
+      - targets: 
+          - 'node-slave1:16030'
+          - 'node-slave2:16030'
+    scrape_interval: 30s
+    metrics_path: /jmx
+    params:
+      qry: ['Hadoop:service=HBase,name=RegionServer*']
+
+  # Kafka 监控
+  - job_name: 'kafka'
+    static_configs:
+      - targets: 
+          - 'node-master:9092'
+          - 'node-slave1:9092'
+          - 'node-slave2:9092'
+    scrape_interval: 30s
+    metrics_path: /metrics
+    # 需要 Kafka Exporter，下面会安装
+
+  # Spark 监控
+  - job_name: 'spark-master'
+    static_configs:
+      - targets: ['node-master:8080']
+    scrape_interval: 30s
+    metrics_path: /metrics
+
+  - job_name: 'spark-worker'
+    static_configs:
+      - targets: 
+          - 'node-master:8081'
+          - 'node-slave1:8081'
+          - 'node-slave2:8081'
+    scrape_interval: 30s
+    metrics_path: /metrics
+
+  # Grafana 监控 - 新增
+  - job_name: 'grafana'
+    static_configs:
+      - targets: ['localhost:3000']
+    scrape_interval: 30s
+    metrics_path: /metrics
+
+# 验证配置文件语法
+/usr/local/prometheus/promtool check config /usr/local/prometheus/prometheus.yml
+
+3. 创建告警规则
+
+mkdir -p /usr/local/prometheus/rules
+nano /usr/local/prometheus/rules/cluster_alerts.yml
+
+# cluster_alerts.yml 内容：
+groups:
+  - name: node_alerts
+    rules:
+      # 节点宕机告警
+      - alert: NodeDown
+        expr: up{job="node-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          cluster: hadoop-cluster
+        annotations:
+          summary: "节点 {{ $labels.instance }} 宕机"
+          description: "节点 {{ $labels.instance }} 已经超过1分钟无法访问"
+
+      # 高CPU使用率告警
+      - alert: HighCpuUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "节点 {{ $labels.instance }} CPU使用率过高"
+          description: "CPU使用率持续5分钟超过80%，当前值: {{ $value }}%"
+
+      # 高内存使用率告警
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "节点 {{ $labels.instance }} 内存使用率过高"
+          description: "内存使用率持续5分钟超过85%，当前值: {{ $value }}%"
+
+      # 磁盘空间告警
+      - alert: DiskSpaceLow
+        expr: (1 - (node_filesystem_avail_bytes{fstype!="tmpfs"} / node_filesystem_size_bytes)) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "节点 {{ $labels.instance }} 磁盘空间不足"
+          description: "分区 {{ $labels.mountpoint }} 使用率超过80%，当前值: {{ $value }}%"
+
+  - name: hadoop_alerts
+    rules:
+      # HDFS 空间告警
+      - alert: HDFSSpaceLow
+        expr: hadoop_namenode_capacity_used_percent > 85
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HDFS 存储空间不足"
+          description: "HDFS 使用率超过85%，当前值: {{ $value }}%"
+
+      # DataNode 宕机告警
+      - alert: DataNodeDown
+        expr: hadoop_namenode_num_live_data_nodes < 2
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DataNode 节点异常"
+          description: "存活的DataNode数量少于2个，当前值: {{ $value }}"
+
+  - name: kafka_alerts
+    rules:
+      # Kafka Broker 宕机
+      - alert: KafkaBrokerDown
+        expr: kafka_server_kafkaserver_value{name="BrokerState"} != 3
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka Broker {{ $labels.instance }} 状态异常"
+          description: "Broker状态不是运行中(3)，当前状态: {{ $value }}"
+
+  - name: monitoring_alerts
+    rules:
+      # Prometheus 自身宕机告警 - 新增
+      - alert: PrometheusDown
+        expr: up{job="prometheus-self"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus 监控服务宕机"
+          description: "Prometheus 服务无法访问，监控系统可能失效"
+
+      # Grafana 服务宕机告警 - 新增
+      - alert: GrafanaDown
+        expr: up{job="grafana"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Grafana 可视化服务异常"
+          description: "Grafana 服务无法访问，仪表板可能不可用"
+
+      # 监控数据存储空间告警 - 新增
+      - alert: PrometheusStorageFull
+        expr: prometheus_tsdb_storage_blocks_bytes / prometheus_tsdb_storage_blocks_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus 存储空间不足"
+          description: "Prometheus 数据存储使用率超过90%，当前值: {{ $value | humanizePercentage }}"
+
+# 4. 创建 Prometheus 系统服务
+
+sudo nano /etc/systemd/system/prometheus.service
+# prometheus.service 内容：
+
+[Unit]
+Description=Prometheus 3.5.0 Time Series Collection and Processing Server
+Documentation=https://prometheus.io/docs/
+After=network.target
+
+[Service]
+User=asked
+Group=asked
+Type=simple
+ExecStart=/usr/local/prometheus/prometheus \
+  --config.file=/usr/local/prometheus/prometheus.yml \
+  --storage.tsdb.path=/usr/local/prometheus/data \
+  --storage.tsdb.retention.time=30d \
+  --web.console.templates=/usr/local/prometheus/consoles \
+  --web.console.libraries=/usr/local/prometheus/console_libraries \
+  --web.listen-address=:9090 \
+  --web.external-url= \
+  --enable-feature=remote-write-receiver \
+  --query.lookback-delta=2m
+
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+# 启动 Prometheus：
+sudo systemctl daemon-reload
+sudo systemctl enable prometheus
+sudo systemctl start prometheus
+sudo systemctl status prometheus
+
+# 验证
+curl http://localhost:9090/api/v1/status/version
+curl http://localhost:9090/targets
+
+# 正确验证 Prometheus
+# 检查健康状态
+curl -s http://localhost:9090/-/healthy
+# 检查版本信息（正确的API端点）
+curl -s http://localhost:9090/api/v1/status/version | head -10
+# 检查监控目标状态
+curl -s http://localhost:9090/api/v1/targets | head -20
+# 检查就绪状态
+curl -s http://localhost:9090/-/ready
+# 2. 验证告警规则加载
+# 检查规则是否加载
+curl -s http://localhost:9090/api/v1/rules | head -20
+# 3. 检查防火墙和端口
+# 检查端口监听
+sudo netstat -tlnp | grep 9090
+
+# 开放防火墙端口（如果防火墙启用）
+sudo ufw allow 9090/tcp comment "Prometheus"
+sudo ufw status
+
+第三阶段：Alertmanager 0.27.0 安装配置（master节点）
+============================================
+
+1. 安装 Alertmanager 0.27.0
+
+# 回到 /tmp 目录
+cd /tmp
+# 下载 Alertmanager 0.27.0
+wget https://github.com/prometheus/alertmanager/releases/download/v0.27.0/alertmanager-0.27.0.linux-amd64.tar.gz
+# 如果下载失败，尝试代理
+wget https://ghproxy.com/https://github.com/prometheus/alertmanager/releases/download/v0.27.0/alertmanager-0.27.0.linux-amd64.tar.gz
+# 解压安装
+sudo tar -xzf alertmanager-0.27.0.linux-amd64.tar.gz -C /usr/local/
+sudo mv /usr/local/alertmanager-0.27.0.linux-amd64 /usr/local/alertmanager
+sudo chown -R asked:asked /usr/local/alertmanager
+# 创建数据目录
+sudo mkdir -p /usr/local/alertmanager/data
+sudo chown -R asked:asked /usr/local/alertmanager
+# 验证安装
+ls -la /usr/local/alertmanager/
+/usr/local/alertmanager/alertmanager --version
+
+# 2. 配置 Alertmanager
+cd /usr/local/alertmanager
+nano alertmanager.yml
+
+# 删除原有内容
+# alertmanager.yml 的内容为： 这里的内容其实有一部分是在邮箱上有问题 导致无法发送邮箱之类的 会卡壳 不要太过于纠结,因为我在这里停了一下午-_-
+
+global:
+  smtp_smarthost: 'smtp.qq.com:587'    # QQ邮箱SMTP,QQ邮箱贼lj用outlook'smtp.office365.com:587'
+  smtp_from: 'your-email@outlook.com'
+  smtp_auth_username: 'your-email@outlook.com'
+  smtp_auth_password: 'your-auth-code'  # 授权码，不是密码,如果用out邮箱 直接放密码 QQ游戏这里特别有病 我发短信不给验证码
+  smtp_require_tls: true
+
+route:
+  group_by: ['alertname', 'cluster']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'web.hook'
+  routes:
+    - match:
+        severity: critical
+      receiver: 'critical-alerts'
+      group_wait: 5s
+      repeat_interval: 5m
+
+receivers:
+  - name: 'email-alerts'
+    email_configs:
+      - to: 'your-email@outlook.com'
+  - name: 'critical-alerts'
+    email_configs:
+      - to: 'byh3126932878@outlook.com'
+        subject: '【ALERT】{{ .GroupLabels.alertname }}'
+        body: |
+          告警名称: {{ .GroupLabels.alertname }}
+          告警级别: {{ .CommonLabels.severity }}
+          触发时间: {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          告警详情: {{ .CommonAnnotations.summary }}
+
+  - name: 'critical-alerts'
+    email_configs:
+      - to: 'byh3126932878@outlook.com'
+        subject: '【CRITICAL】{{ .GroupLabels.alertname }}'
+        body: |
+          紧急告警
+          
+          告警名称: {{ .GroupLabels.alertname }}
+          告警级别: {{ .CommonLabels.severity }}
+          触发时间: {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          告警详情: {{ .CommonAnnotations.description }}
+          
+          请立即处理！
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'cluster', 'instance']
+
+# 验证配置语法
+/usr/local/alertmanager/amtool check-config /usr/local/alertmanager/alertmanager.yml
+
+# Outlook SMTP 配置
+# 测试 SMTP 连接（需要安装 telnet 或 swaks）
+sudo apt-get install -y telnet
+
+# 测试 SMTP 连接
+telnet smtp.office365.com 587
+
+# 测试 Outlook SMTP 连接
+# 安装邮件测试工具
+sudo apt-get update
+sudo apt-get install -y swaks
+
+# 测试 Outlook SMTP（使用你的实际配置）
+swaks --to @outlook.com \
+  --from @outlook.com \
+  --server smtp.office365.com:587 \
+  --auth LOGIN \
+  --auth-user @outlook.com \
+  --auth-password '' \
+  -tls \
+  --body "测试 Alertmanager 邮件发送"
+
+# 如果有问题建议换邮箱 或者直接先不管
+# Gmail 的基础认证仍然可用：
+
+global:
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_from: '你的gmail@gmail.com'
+  smtp_auth_username: '你的gmail@gmail.com'
+  smtp_auth_password: '你的应用密码'  # Gmail应用密码
+  smtp_require_tls: true
+
+route:
+  group_by: ['alertname', 'cluster']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'default-alerts'
+  routes:
+    - match:
+        severity: critical
+      receiver: 'critical-alerts'
+      group_wait: 5s
+      repeat_interval: 5m
+
+receivers:
+  - name: 'default-alerts'
+    email_configs:
+      - to: '你的接收邮箱@gmail.com'
+        subject: '【ALERT】{{ .GroupLabels.alertname }}'
+        body: '告警详情: {{ .CommonAnnotations.description }}'
+
+  - name: 'critical-alerts'
+    email_configs:
+      - to: '你的接收邮箱@gmail.com'
+        subject: '【CRITICAL】{{ .GroupLabels.alertname }}'
+        body: '紧急告警！请立即处理: {{ .CommonAnnotations.description }}'
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'cluster', 'instance']
+
+# 再或者直接不管
+
+global:
+  # 暂时不配置邮件
+
+route:
+  group_by: ['alertname', 'cluster']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'webhook'
+
+receivers:
+  - name: 'webhook'
+    webhook_configs:
+      - url: 'http://localhost:5001/'
+    # 可以添加其他通知方式，如slack、telegram等
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'cluster', 'instance']
+
+# 3. 创建 Alertmanager 系统服务
+sudo nano /etc/systemd/system/alertmanager.service
+
+# alertmanager.service 内容：
+[Unit]
+Description=Alertmanager 0.27.0 for Prometheus
+Documentation=https://prometheus.io/docs/alerting/alertmanager/
+After=network.target prometheus.service
+
+[Service]
+User=asked
+Group=asked
+Type=simple
+ExecStart=/usr/local/alertmanager/alertmanager \
+  --config.file=/usr/local/alertmanager/alertmanager.yml \
+  --storage.path=/usr/local/alertmanager/data \
+  --web.listen-address=:9093 \
+  --cluster.listen-address=:9094
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+# 启动 Alertmanager：
+sudo systemctl daemon-reload
+sudo systemctl enable alertmanager
+sudo systemctl start alertmanager
+sudo systemctl status alertmanager
+
+# 使用新的 v2 API 检查状态
+curl http://localhost:9093/api/v2/status
+# 检查健康状态
+curl http://localhost:9093/-/healthy
+# 检查就绪状态
+curl http://localhost:9093/-/ready
+# 检查端口监听
+netstat -tlnp | grep 9093
+# 检查服务状态
+sudo systemctl status alertmanager
+
+# 验证
+curl http://localhost:9093/api/v1/status
+# 检查健康状态
+curl http://localhost:9093/-/healthy
+# 检查Alertmanager状态
+curl http://localhost:9093/api/v1/status | head -10
+
+第四阶段：Grafana 12.2.0 安装配置（master节点）
+============================================
+
+1. 安装 Grafana 12.2.0
+
+# 添加 Grafana 仓库
+sudo apt-get install -y software-properties-common
+sudo add-apt-repository "deb https://packages.grafana.com/oss/deb stable main"
+wget -q -O - https://packages.grafana.com/gpg.key | sudo apt-key add -
+
+# 安装 Grafana
+sudo apt-get update
+sudo apt-get install -y grafana
+
+# 或者使用二进制安装（备选）
+cd /tmp
+wget https://dl.grafana.com/oss/release/grafana-12.2.0.linux-amd64.tar.gz
+sudo tar -xzf grafana-12.2.0.linux-amd64.tar.gz -C /usr/local/
+sudo mv /usr/local/grafana-12.2.0 /usr/local/grafana
+sudo chown -R asked:asked /usr/local/grafana
+
+# 在安装 Grafana 后立即重置：
+# 安装完成后，确保数据库初始状态正常
+sudo systemctl stop grafana-server
+sudo rm -f /var/lib/grafana/grafana.db
+sudo systemctl start grafana-server
+sleep 10
+
+# 2. 配置 Grafana
+
+sudo nano /etc/grafana/grafana.ini
+
+# 找到配置内容修改：
+[server]
+http_port = 3000
+domain = node-master
+root_url = http://node-master:3000/
+
+[database]
+type = sqlite3
+path = grafana.db
+
+[security]
+admin_user = asked
+admin_password = asdfghjkl;'
+secret_key = SW2YcwTIb9zpOOhoPsMm
+
+[users]
+allow_sign_up = false
+auto_assign_org = true
+auto_assign_org_role = Viewer
+
+[auth.anonymous]
+enabled = true
+org_name = Main Org.
+org_role = Viewer
+
+
+# 修复 node-slave1 配置
+ssh asked@192.168.100.102 "sudo sed -i '/^grafana\\[/d' /etc/gitlab/gitlab.rb"
+ssh asked@192.168.100.102 "sudo gitlab-ctl reconfigure"
+
+# 或者直接使用set修改一下
+# 使用 sed 命令直接修改关键配置
+sudo sed -i 's/^;http_port = 3000/http_port = 3000/' /etc/grafana/grafana.ini
+sudo sed -i 's/^;domain = localhost/domain = node-master/' /etc/grafana/grafana.ini
+sudo sed -i 's|^;root_url = %(protocol)s://%(domain)s:%(http_port)s/|root_url = http://node-master:3000/|' /etc/grafana/grafana.ini
+
+sudo sed -i 's/^;admin_user = admin/admin_user = asked/' /etc/grafana/grafana.ini
+sudo sed -i 's/^;admin_password = admin/admin_password = asdfghjkl;/' /etc/grafana/grafana.ini
+
+sudo sed -i 's/^;allow_sign_up = false/allow_sign_up = false/' /etc/grafana/grafana.ini
+sudo sed -i 's/^;auto_assign_org = true/auto_assign_org = true/' /etc/grafana/grafana.ini
+sudo sed -i 's/^;auto_assign_org_role = Viewer/auto_assign_org_role = Viewer/' /etc/grafana/grafana.ini
+
+sudo sed -i 's/^;enabled = false/enabled = true/' /etc/grafana/grafana.ini
+sudo sed -i 's/^;org_name = Main Org./org_name = Main Org./' /etc/grafana/grafana.ini
+sudo sed -i 's/^;org_role = Viewer/org_role = Viewer/' /etc/grafana/grafana.ini
+
+# 设置密钥（如果不存在则添加）
+sudo grep -q "^secret_key" /etc/grafana/grafana.ini || echo "secret_key = SW2YcwTIb9zpOOhoPsMm" | sudo tee -a /etc/grafana/grafana.ini
+
+# 验证修改
+echo "=== 检查修改结果 ==="
+grep -E "^(http_port|domain|root_url|admin_user|admin_password|allow_sign_up)" /etc/grafana/grafana.ini
+
+3. 启动 Grafana
+
+sudo systemctl daemon-reload
+sudo systemctl enable grafana-server
+sudo systemctl start grafana-server
+sudo systemctl status grafana-server
+
+# 如果登录失败，执行数据库重置：
+# sudo systemctl stop grafana-server
+# sudo mv /var/lib/grafana/grafana.db /var/lib/grafana/grafana.db.backup
+# sudo systemctl start grafana-server
+# sleep 10
+
+# 验证
+curl http://localhost:3000/api/health
+
+第五阶段：配置数据源和仪表板
+============================================
+
+1. 添加 Prometheus 数据源
+通过API配置：
+
+# 等待Grafana启动
+sleep 10
+
+# 添加Prometheus数据源（注意密码中的特殊字符需要转义）
+curl -X POST "http://asked:asdfghjkl%3B'@localhost:3000/api/datasources" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name":"Prometheus",
+    "type":"prometheus",
+    "url":"http://localhost:9090",
+    "access":"proxy",
+    "isDefault":true,
+    "jsonData": {
+      "timeInterval":"15s"
+    }
+  }'
+
+2. 导入监控仪表板
+
+# 下载Node Exporter仪表板
+DASHBOARD_ID=1860
+curl -s https://grafana.com/api/dashboards/${DASHBOARD_ID}/revisions/1/download > /tmp/node-exporter.json
+
+# 导入仪表板（注意密码转义）
+curl -X POST "http://asked:asdfghjkl%3B'@localhost:3000/api/dashboards/db" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/node-exporter.json
+
+第六阶段：专用Exporter安装
+============================================
+
+1. 安装 Kafka Exporter
+
+cd /tmp
+wget https://github.com/danielqsj/kafka_exporter/releases/download/v1.7.0/kafka_exporter-1.7.0.linux-amd64.tar.gz
+tar -xzf kafka_exporter-1.7.0.linux-amd64.tar.gz
+sudo mv kafka_exporter-1.7.0.linux-amd64/kafka_exporter /usr/local/bin/
+sudo chmod +x /usr/local/bin/kafka_exporter
+
+# 创建服务
+sudo nano /etc/systemd/system/kafka_exporter.service
+
+# kafka_exporter.service内容是：
+
+[Unit]
+Description=Kafka Exporter
+Documentation=https://github.com/danielqsj/kafka_exporter
+After=network.target kafka.service
+
+[Service]
+User=asked
+Group=asked
+Type=simple
+ExecStart=/usr/local/bin/kafka_exporter \
+  --kafka.server=node-master:9092 \
+  --kafka.server=node-slave1:9092 \
+  --kafka.server=node-slave2:9092 \
+  --web.listen-address=:9308 \
+  --log.level=info
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+# 启动服务：
+sudo systemctl daemon-reload
+sudo systemctl enable kafka_exporter
+sudo systemctl start kafka_exporter
+
+# 更新 Prometheus 配置：
+# 在 Prometheus 配置中添加 Kafka Exporter
+sudo nano /usr/local/prometheus/prometheus.yml
+
+# 在 scrape_configs 部分添加（替换原来的 kafka job）：
+
+  # Kafka Exporter 监控
+  - job_name: 'kafka-exporter'
+    static_configs:
+      - targets: ['localhost:9308']
+    scrape_interval: 30s
+    metrics_path: /metrics
+
+# 重启 Prometheus：
+sudo systemctl restart prometheus
+sudo systemctl status prometheus
+sleep 5
+
+# 验证 Kafka 监控
+# 验证 Kafka Exporter 是否被 Prometheus 监控
+curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job == "kafka-exporter")'
+
+# 检查 Kafka Exporter 本身的指标
+curl http://localhost:9308/metrics | grep -E "(kafka_brokers|kafka_topic_partitions)" | head -10
+
+# 完整的监控系统状态检查
+echo "=== 完整监控系统状态 ==="
+echo "1. Prometheus: $(curl -s http://localhost:9090/-/healthy && echo '✓')"
+echo "2. Alertmanager: $(curl -s http://localhost:9093/-/healthy && echo '✓')"
+echo "3. Grafana: $(curl -s http://localhost:3000/api/health | jq -r '.database') ✓"
+echo "4. Node Exporters:"
+for node in node-master node-slave1 node-slave2; do
+  status=$(curl -s -o /dev/null -w "%{http_code}" http://$node:9100/metrics)
+  echo "   $node: $status ✓"
+done
+echo "5. Kafka Exporter: $(curl -s -o /dev/null -w "%{http_code}" http://localhost:9308/metrics) ✓"
+
+# 在 Grafana 中导入 Kafka 仪表板
+KAFKA_DASHBOARD_ID=11663
+curl -s https://grafana.com/api/dashboards/${KAFKA_DASHBOARD_ID}/revisions/1/download > /tmp/kafka-dashboard.json
+curl -X POST "http://asked:asdfghjkl%3B'@localhost:3000/api/dashboards/db" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/kafka-dashboard.json
+
+echo "=== 访问地址 ==="
+echo "Grafana: http://192.168.100.101:3000"
+echo "Prometheus: http://192.168.100.101:9090"
+echo "Alertmanager: http://192.168.100.101:9093"
+
+第七阶段：防火墙配置和验证
+============================================
+
+1. 开放监控端口
+
+# 在master节点
+sudo ufw allow 9090/tcp comment "Prometheus"
+sudo ufw allow 9093/tcp comment "Alertmanager" 
+sudo ufw allow 3000/tcp comment "Grafana"
+sudo ufw allow 9308/tcp comment "Kafka Exporter"
+
+# 验证防火墙规则
+sudo ufw status numbered
+
+2. 完整验证脚本
+
+#!/bin/bash
+echo "=== 监控系统健康检查 ==="
+
+echo "1. Node Exporter状态:"
+for node in node-master node-slave1 node-slave2; do
+  status=$(curl -s -o /dev/null -w "%{http_code}" http://$node:9100/metrics)
+  echo "  $node: $status"
+done
+
+echo "2. Prometheus状态:"
+curl -s http://localhost:9090/-/healthy && echo "Prometheus: 健康"
+curl -s http://localhost:9090/api/v1/targets | jq -r '.data.activeTargets[] | "\(.labels.job): \(.health)"'
+
+echo "3. Alertmanager状态:"
+curl -s http://localhost:9093/-/healthy && echo "Alertmanager: 健康"
+
+echo "4. Grafana状态:"
+curl -s http://localhost:3000/api/health | jq -r '"Grafana: \(.database)"'
+
+echo "5. Kafka Exporter状态:"
+curl -s http://localhost:9308/metrics | head -5
+
+echo "6. 监控系统自监控状态:"
+curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job | contains("prometheus-self")) | "Prometheus自监控: \(.health)"'
+curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.labels.job | contains("grafana")) | "Grafana监控: \(.health)"'
+
+echo "=== 监控系统部署完成 ==="
+echo "访问地址:"
+echo "Grafana仪表板: http://192.168.100.101:3000"
+echo "Prometheus查询: http://192.168.100.101:9090"
+echo "Alertmanager告警: http://192.168.100.101:9093"
+
+# 保存为 check_monitoring.sh 并执行
+chmod +x check_monitoring.sh
+./check_monitoring.sh
+
+第八阶段：故障排查和优化
+============================================
+
+1. 常见故障排查
+
+# 检查服务状态
+sudo systemctl status prometheus alertmanager grafana-server node_exporter kafka_exporter
+
+# 检查端口监听
+sudo netstat -tlnp | grep -E "(9090|9093|3000|9100|9308)"
+
+# 检查日志
+sudo journalctl -u prometheus -f
+sudo journalctl -u alertmanager -f
+sudo journalctl -u grafana-server -f
+
+# 检查Prometheus目标状态
+curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | "\(.labels.job)-\(.labels.instance): \(.health)"'
+
+2. 性能优化建议
+
+# Prometheus 配置优化
+# 在 prometheus.yml 中添加：
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  query_log_file: /usr/local/prometheus/query.log
+
+# 存储优化
+storage:
+  tsdb:
+    retention: 30d
+    min-block-duration: 2h
+    max-block-duration: 24h
+
+# Grafana 性能优化
+# 在 grafana.ini 中：
+[alerting]
+enabled = false  # 如果不使用Grafana告警
+
+[dashboards]
+min_refresh_interval = 30s
+
+3. 数据备份
+
+# 创建监控数据备份脚本
+sudo nano /usr/local/bin/backup_monitoring.sh
+
+# 备份脚本内容：
+#!/bin/bash
+BACKUP_DIR="/backup/monitoring"
+DATE=$(date +%Y%m%d_%H%M%S)
+
+mkdir -p $BACKUP_DIR/$DATE
+
+# 备份Prometheus数据
+sudo systemctl stop prometheus
+tar -czf $BACKUP_DIR/$DATE/prometheus_data.tar.gz -C /usr/local/prometheus/data .
+sudo systemctl start prometheus
+
+# 备份Grafana配置
+tar -czf $BACKUP_DIR/$DATE/grafana_config.tar.gz -C /etc/grafana .
+
+# 备份Alertmanager配置
+cp /usr/local/alertmanager/alertmanager.yml $BACKUP_DIR/$DATE/
+cp /usr/local/prometheus/prometheus.yml $BACKUP_DIR/$DATE/
+cp -r /usr/local/prometheus/rules $BACKUP_DIR/$DATE/
+
+echo "监控数据备份完成: $BACKUP_DIR/$DATE"
+
+# 设置定时备份（每天2点）
+echo "0 2 * * * /usr/local/bin/backup_monitoring.sh" | sudo crontab -
+
+=============================================
+部署完成总结
+=============================================
+
+ 已完成的组件：
+✓ Node Exporter (系统监控)
+✓ Prometheus (指标收集)
+✓ Alertmanager (告警管理) 
+✓ Grafana (可视化)
+✓ Kafka Exporter (Kafka监控)
+✓ 完整的告警规则
+✓ 防火墙配置
+
+📊 访问地址：
+Grafana: http://192.168.100.101:3000 (asked/asdfghjkl;')
+Prometheus: http://192.168.100.101:9090
+Alertmanager: http://192.168.100.101:9093
+
+🔧 后续维护：
+1. 定期检查监控目标状态
+2. 根据业务需求调整告警阈值
+3. 定期备份监控数据
+4. 更新仪表板和告警规则
+
+📈 监控覆盖范围：
+- 系统资源 (CPU、内存、磁盘、网络)
+- Hadoop HDFS/YARN 状态
+- HBase Master/RegionServer
+- Kafka Broker 和 Topic
+- Spark Master/Worker
+- 监控系统自身健康状态
+
+[文档结束]

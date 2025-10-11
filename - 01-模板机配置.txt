@@ -1,0 +1,395 @@
+[file name]: 1模板机.txt
+[file content begin]
+[File creator 槐鼎昊安]
+
+# ============================================
+# Hadoop 大数据平台模板机配置指南
+# 组件版本推荐及系统基础配置
+# Ubuntu Server 24.04.2 - 虚拟机模板
+# ============================================
+
+# 一、Hadoop 生态组件版本兼容性矩阵
+# ============================================
+
+组件			推荐版本		兼容范围		关键说明
+Hadoop		3.3.6			3.1.0 - 3.4.x	必须使用 Hadoop 3.x
+JDK			11			8, 11			推荐 JDK 11，不支持 JDK 17+
+PostgreSQL	13.12		11.x - 15.x		避免使用 PostgreSQL 16+
+Spark		3.3.3			3.0.x - 3.5.x	关键：匹配 Hive-Spark 版本
+HBase		2.4.18		2.2.x - 2.5.x	需要对应 HBase Storage Handler
+Hue			4.11.0		4.10.x - 4.12.x	需要适配 Hive 4.x 语法
+Tez			0.10.2		0.9.x - 0.10.x	可选执行引擎
+Zookeeper	3.8.3			3.4.x - 3.8.x	元数据高可用需要
+MySQL		8.0.x			5.7.x - 8.0.x	替代 PostgreSQL 选项
+
+# 相关依赖版本
+PostgreSQL JDBC: 42.6.0 或 42.7.0
+Apache Ranger: 2.4.0 (安全管理)
+Atlas: 2.3.0 (数据治理)
+
+# 二、数据库配置要点
+# ============================================
+
+# PostgreSQL 13+ 配置要点
+bash
+# 编辑配置文件：/etc/postgresql/13/main/postgresql.conf
+max_connections = 100
+shared_buffers = 256MB
+wal_level = logical
+
+# JDBC 连接参数
+?stringtype=unspecified&sslmode=disable
+
+# 三、组件集成配置
+# ============================================
+
+# HBase 集成配置
+bash
+# hive-site.xml 中 HBase 集成配置
+hive.aux.jars.path = /path/to/hbase/lib/*
+hive.base.dir = hdfs:///hive
+
+# Hue 适配 Hive 4.x
+bash
+# hue.ini 配置
+[beeswax]
+hive_server_host=localhost
+hive_server_port=10000
+hive_conf_dir=/etc/hive/conf
+# 支持 Hive 4.x 语法
+hive_query_timeout=3600
+
+# 四、系统网络配置
+# ============================================
+
+# 环境说明：
+# - 操作系统：Ubuntu Server 24.04.2
+# - 网络模式：NAT模式，与实体机共用路由器网络
+# - 查看IP命令：ip a
+# - 常见网卡名称：ens33、ens160、enp0s3、eth0
+
+# 4.1 查看网络接口信息
+ip a
+# 确认网卡名称和当前IP地址
+
+# 4.2 虚拟机网络设置参考
+# - 打开 VMware → 编辑 → 虚拟网络编辑器
+# - 查看 VMnet8 (NAT模式) 配置
+# - 网关通常为：192.168.x.2
+# - 可用IP范围：192.168.x.2-254
+
+# 4.3 查找 Netplan 配置文件
+sudo ls /etc/netplan/
+# 常见配置文件：
+# 00-installer-config.yaml
+# 01-netcfg.yaml  
+# 50-cloud-init.yaml
+
+# 4.4 备份网络配置（重要！）
+sudo cp /etc/netplan/50-cloud-init.yaml /etc/netplan/50-cloud-init.yaml.backup
+
+# 4.5 编辑网络配置
+sudo nano /etc/netplan/50-cloud-init.yaml
+
+# Netplan 配置重要规则：
+# 1. 禁止使用 Tab 键，只用空格
+# 2. 每级缩进都是2个空格
+# 3. 冒号 : 后面必须有一个空格
+# 4. 短横线 - 后面必须有一个空格
+# 5. 逗号 , 后面通常有一个空格
+
+# 4.6 标准网络配置模板
+network:                # 顶级，无缩进 - 网络配置模块
+  version: 2                # 缩进2空格 - 指定netplan配置版本
+  ethernets:                # 缩进2空格 - 声明下面要配置的是有线以太网接口
+    ens33:                  # 缩进4空格 (2+2) - 指定要配置的网络接口名称
+      dhcp4: no             # 缩进6空格 (2+2+2) - 禁用IPv4的DHCP自动获取
+      dhcp6: no             # 缩进6空格 - 禁用IPv6的DHCP自动获取
+      addresses:            # 缩进6空格 - 开始定义静态IP配置
+        - 192.168.1.101/24 # 缩进8空格 - 设置静态IP和子网掩码
+      routes:               # 缩进6空格 - 定义路由配置
+        - to: 0.0.0.0/0    # 缩进8空格 - 设置默认路由
+          via: 192.168.100.2 # 缩进10空格 - 指定网关地址
+      nameservers:          # 缩进6空格 - 定义DNS服务器配置
+        addresses: [8.8.8.8, 1.1.1.1, 192.168.1.2]  # 缩进8空格 - DNS服务器
+        search: [local, home, lan]  # 缩进8空格 - DNS搜索域
+
+# 4.7 简洁配置格式（等效）
+network:
+  version: 2
+  ethernets:
+    ens33:
+      dhcp4: no
+      dhcp6: no
+      addresses: [192.168.100.101/24]
+      routes:
+        - to: default
+          via: 192.168.100.2
+      nameservers:
+        addresses: [8.8.8.8, 1.1.1.1, 192.168.100.2]
+        search: [local, home, lan]
+
+# 4.8 保存配置
+# Nano编辑器：Ctrl+X → Y → Enter
+
+# 4.9 应用网络配置
+sudo netplan apply
+
+# 4.10 验证网络配置
+ip a show ens33
+
+# 4.11 SSH 连接配置和问题排查
+# 使用本机 PowerShell 连接虚拟机
+ssh asked@192.168.100.101
+
+# SSH 连接常见问题及解决方案：
+
+# 问题1：主机密钥变更警告（切换用户或重装系统后）
+# 错误信息：WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!
+# 解决方案（在 PowerShell 中执行）：
+ssh-keygen -R 192.168.100.101
+# 或者删除整个 known_hosts 文件（不推荐）
+# Remove-Item C:\Users\YourName\.ssh\known_hosts
+
+# 问题2：首次连接确认指纹
+# 正常提示：The authenticity of host '192.168.100.101' can't be established.
+# 输入 yes 接受密钥即可
+
+# 问题3：Permission denied (publickey)
+# 检查虚拟机SSH服务状态：
+sudo systemctl status ssh
+# 确保使用正确密码
+
+# 4.12 优化SSH连接体验
+# 在Windows主机配置SSH配置文件：
+# 创建或编辑：C:\Users\YourName\.ssh\config
+# 添加以下内容：
+Host node-master
+    HostName 192.168.100.101
+    User asked
+    Port 22
+
+Host node-slave1
+    HostName 192.168.100.102
+    User asked
+    Port 22
+
+Host node-slave2
+    HostName 192.168.100.103
+    User asked
+    Port 22
+
+# 配置后可直接使用主机名连接：
+ssh node-master
+
+# 五、网络连通性测试
+# ============================================
+
+# 5.1 基础连通性测试
+ping -c 4 www.baidu.com
+
+# 5.2 诊断网络问题
+# 检查 Netplan 配置
+sudo netplan --debug apply
+
+# 验证配置语法
+sudo netplan try
+# 等待提示后按 Enter 确认
+
+# 重启网络服务
+sudo systemctl restart systemd-networkd
+
+# 5.3 完整网络测试流程
+# 测试网关连通性
+ping -c 4 192.168.100.2
+
+# 测试公网连通性  
+ping -c 4 8.8.8.8
+
+# 测试DNS解析
+ping -c 4 google.com
+
+# 六、系统更新与维护
+# ============================================
+
+# 6.1 系统更新流程
+# 更新软件包列表
+sudo apt update
+
+# 查看可更新软件包
+apt list --upgradable
+
+# 升级所有已安装的包
+sudo apt upgrade -y
+
+# 全面升级（处理依赖关系变更）
+sudo apt dist-upgrade -y
+
+# 清理不再需要的旧软件包
+sudo apt autoremove
+
+# 6.2 清理备份文件
+sudo rm /etc/netplan/50-cloud-init.yaml.backup
+sudo ls /etc/netplan/
+
+# 6.3 重启系统（如内核升级）
+sudo reboot
+
+# 七、安全配置
+# ============================================
+
+# 7.1 防火墙配置（重要警告！）
+# 必须先允许SSH连接！
+sudo ufw allow ssh
+
+# 如果修改了SSH端口，使用：
+# sudo ufw allow 2222/tcp
+
+# 启用防火墙
+sudo ufw enable
+# 提示确认：Command may disrupt existing ssh connections. Proceed with operation (y|n)? y
+
+# 查看防火墙状态
+sudo ufw status verbose
+
+# 关闭防火墙
+sudo ufw disable
+
+# 八、系统时间配置
+# ============================================
+
+# 8.1 检查当前时区
+timedatectl
+date
+
+# 8.2 设置时区方法
+# 交互式选择时区
+sudo dpkg-reconfigure tzdata
+
+# 直接设置时区（亚洲上海）
+sudo timedatectl set-timezone Asia/Shanghai
+
+# 验证时区设置
+timedatectl
+
+# 九、用户管理
+# ============================================
+
+# 9.1 创建新用户（如admin）
+sudo adduser admin
+
+# 9.2 授予sudo权限
+sudo usermod -aG sudo admin
+
+# 9.3 切换用户测试
+su - admin
+sudo apt update
+exit
+
+# 9.4 切换用户方法
+# 切换到其他用户
+su - username
+
+# 以其他用户执行单条命令
+sudo -u username command
+
+# 9.5 查看所有用户
+cat /etc/passwd
+
+# 9.6 删除用户
+# 确保当前不在要删除的用户下
+exit
+
+# 删除用户及家目录
+sudo deluser --remove-home username
+
+# 从sudo组中移除用户
+sudo deluser username sudo
+
+# 验证删除
+getent passwd username
+
+# 十、Java环境安装
+# ============================================
+
+# 10.1 安装OpenJDK 11（推荐）
+sudo apt install -y openjdk-11-jdk-headless
+
+# 10.2 安装OpenJDK 8（兼容选项）
+# sudo apt install -y openjdk-8-jdk-headless
+
+# 10.3 验证安装
+java -version
+
+# 十一、基础工具安装
+# ============================================
+
+# 11.1 安装三件套
+sudo apt install -y vim net-tools curl
+
+# 11.2 验证安装
+# 方法一：使用dpkg检查
+dpkg -l | grep vim
+dpkg -l | grep net-tools
+dpkg -l | grep curl
+
+# 方法二：使用which命令
+which vim
+which ifconfig
+which curl
+
+# 方法三：查看版本信息
+vim --version | head -n 1
+ifconfig --version
+curl --version | head -n 1
+
+# 十二、模板机清理
+# ============================================
+
+# 12.1 清理命令历史
+history -c
+
+# 12.2 关机准备
+sudo poweroff
+
+# 十三、环境验证脚本
+# ============================================
+
+# 13.1 网络验证
+echo "=== 网络状态验证 ==="
+ip a show ens33
+echo "网关连通性:" && ping -c 2 192.168.1.1
+echo "公网连通性:" && ping -c 2 8.8.8.8
+echo "DNS解析:" && ping -c 2 google.com
+
+# 13.2 系统验证
+echo "=== 系统环境验证 ==="
+echo "主机名:" && hostname
+echo "Java版本:" && java -version 2>&1 | head -1
+echo "JAVA_HOME:" && echo $JAVA_HOME
+
+# 13.3 工具验证
+echo "=== 工具安装验证 ==="
+which vim && echo "Vim: 已安装"
+which ifconfig && echo "net-tools: 已安装" 
+which curl && echo "curl: 已安装"
+
+# 13.4 服务验证
+echo "=== 服务状态验证 ==="
+sudo ufw status | head -3
+timedatectl | head -4
+
+# ============================================
+# 模板机配置完成！
+# 可基于此模板克隆集群节点
+# ============================================
+
+# 注意事项：
+# 1. 网络配置前务必备份原配置
+# 2. 启用防火墙前务必允许SSH
+# 3. 所有节点时间必须同步
+# 4. 确保Java版本与Hadoop兼容
+# 5. 模板机配置完成后清理历史记录
+# 6. SSH连接问题优先检查known_hosts和防火墙
+
+[file content end]

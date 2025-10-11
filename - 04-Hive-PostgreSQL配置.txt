@@ -1,0 +1,308 @@
+[file name]: 4Hive-PostgreSQL配置.txt
+[file content begin]
+[File creator 槐鼎昊安]
+
+# =============================================
+# Hive 4.0.1 分布式集群安装配置指南
+# =============================================
+
+# 第一阶段：Hive安装与环境配置
+# =============================================
+
+## 1. 下载并安装Hive 4.0.1
+cd /tmp
+wget https://archive.apache.org/dist/hive/hive-4.0.1/apache-hive-4.0.1-bin.tar.gz
+
+# 解压到/usr/local目录
+sudo tar -xzf apache-hive-4.0.1-bin.tar.gz -C /usr/local/
+sudo mv /usr/local/apache-hive-4.0.1-bin /usr/local/hive
+sudo chown -R asked:asked /usr/local/hive
+
+## 2. 在所有节点（master, slave1, slave2）上配置环境变量
+nano ~/.bashrc
+
+# 在文件末尾添加以下内容：
+# Hive Configuration
+export HIVE_HOME=/usr/local/hive
+export PATH=$HIVE_HOME/bin:$PATH
+export HIVE_CONF_DIR=$HIVE_HOME/conf
+#export CLASSPATH=$CLASSPATH:$HIVE_HOME/lib/*	这一行在现代数据搭建中早已被淘汰可以直接不写入
+
+# 使配置生效
+source ~/.bashrc
+
+# 验证配置
+echo $HIVE_HOME
+# 应该输出：/usr/local/hive
+
+# 第二阶段：数据库配置与驱动安装
+# =============================================
+
+## 1. 在master节点安装PostgreSQL
+sudo apt update
+sudo apt install -y postgresql postgresql-contrib
+
+# 检查并启动PostgreSQL服务
+sudo systemctl status postgresql
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+## 2. 配置PostgreSQL数据库和用户
+# 切换到postgres用户
+sudo -u postgres psql
+
+# 在PostgreSQL命令行中执行：
+CREATE USER hive WITH PASSWORD 'asdfghjkl;''';
+CREATE DATABASE hive_metastore OWNER hive;
+GRANT ALL PRIVILEGES ON DATABASE hive_metastore TO hive;
+
+# 退出PostgreSQL
+\q
+
+## 3. 下载并安装PostgreSQL JDBC驱动
+cd /tmp
+wget https://jdbc.postgresql.org/download/postgresql-42.6.0.jar
+
+# 复制到Hive的lib目录
+sudo cp postgresql-42.6.0.jar /usr/local/hive/lib/
+
+# 检查是否复制成功
+ls -l /usr/local/hive/lib/postgresql-42.6.0.jar
+
+## 4. 创建Hive目录结构（所有节点）
+# 创建Hive目录结构
+sudo mkdir -p /usr/local/hive/conf
+sudo mkdir -p /usr/local/hive/lib
+sudo mkdir -p /usr/local/hive/bin
+sudo mkdir -p /usr/local/hive/logs
+
+# 设置权限
+sudo chown -R asked:asked /usr/local/hive
+
+# 验证目录创建
+ls -la /usr/local/hive/
+
+## 5. 创建Hive配置文件（仅在master节点）
+cd /usr/local/hive/conf
+nano hive-site.xml
+
+# 输入以下配置内容：
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+    <!-- Hive Metastore配置 -->
+    <property>
+        <name>javax.jdo.option.ConnectionURL</name>
+        <value>jdbc:postgresql://localhost:5432/hive_metastore</value>
+        <description>PostgreSQL metastore connection URL</description>
+    </property>
+    
+    <property>
+        <name>javax.jdo.option.ConnectionDriverName</name>
+        <value>org.postgresql.Driver</value>
+        <description>PostgreSQL JDBC driver class</description>
+    </property>
+    
+    <property>
+        <name>javax.jdo.option.ConnectionUserName</name>
+        <value>hive</value>
+        <description>Metastore database username</description>
+    </property>
+    
+    <property>
+        <name>javax.jdo.option.ConnectionPassword</name>
+        <value>asdfghjkl;'</value>
+        <description>Metastore database password</description>
+    </property>
+
+    <!-- HiveServer2配置 - 支持远程连接 -->
+    <property>
+        <name>hive.server2.thrift.port</name>
+        <value>10000</value>
+        <description>HiveServer2监听端口</description>
+    </property>
+    
+    <property>
+        <name>hive.server2.thrift.bind.host</name>
+        <value>0.0.0.0</value>
+        <description>绑定所有网络接口，允许远程连接</description>
+    </property>
+    
+    <property>
+        <name>hive.server2.webui.enable</name>
+        <value>true</value>
+        <description>启用HiveServer2 Web UI</description>
+    </property>
+    
+    <property>
+        <name>hive.server2.webui.port</name>
+        <value>10002</value>
+        <description>HiveServer2 Web UI端口</description>
+    </property>
+
+    <!-- HDFS仓库目录 -->
+    <property>
+        <name>hive.metastore.warehouse.dir</name>
+        <value>/user/hive/warehouse</value>
+        <description>Hive数据仓库目录</description>
+    </property>
+    
+    <property>
+        <name>hive.exec.scratchdir</name>
+        <value>/user/hive/tmp</value>
+        <description>Hive临时目录</description>
+    </property>
+
+    <!-- 执行引擎 -->
+    <property>
+        <name>hive.execution.engine</name>
+        <value>mr</value>
+        <description>执行引擎，先用mr</description>
+    </property>
+
+    <!-- 远程连接认证配置 -->
+    <property>
+        <name>hive.server2.authentication</name>
+        <value>NONE</value>
+        <description>不启用认证，方便测试</description>
+    </property>
+    
+    <property>
+        <name>hive.server2.allow.user.substitution</name>
+        <value>true</value>
+        <description>允许用户替换</description>
+    </property>
+    
+    <property>
+        <name>hive.server2.enable.doAs</name>
+        <value>false</value>
+        <description>不以提交用户身份执行</description>
+    </property>
+
+    <!-- 其他配置 -->
+    <property>
+        <name>hive.metastore.schema.verification</name>
+        <value>false</value>
+    </property>
+    
+    <property>
+        <name>datanucleus.schema.autoCreateAll</name>
+        <value>true</value>
+    </property>
+</configuration>
+
+## 6. 分发配置文件到从节点（在master节点执行）
+# 分发配置文件
+scp /usr/local/hive/conf/hive-site.xml asked@node-slave1:/usr/local/hive/conf/
+scp /usr/local/hive/conf/hive-site.xml asked@node-slave2:/usr/local/hive/conf/
+
+# 分发JDBC驱动
+scp /usr/local/hive/lib/postgresql-42.6.0.jar asked@node-slave1:/usr/local/hive/lib/
+scp /usr/local/hive/lib/postgresql-42.6.0.jar asked@node-slave2:/usr/local/hive/lib/
+
+# 或者复制整个Hive目录（备选方案）
+scp -r /usr/local/hive/* asked@node-slave1:/usr/local/hive/
+scp -r /usr/local/hive/* asked@node-slave2:/usr/local/hive/
+
+## 7. 验证所有节点配置
+# 在slave1和slave2节点检查：
+ls -l /usr/local/hive/conf/hive-site.xml
+ls -l /usr/local/hive/lib/postgresql-42.6.0.jar
+echo $HIVE_HOME
+
+# 第三阶段：初始化并启动服务
+# =============================================
+
+## 1. 初始化元数据库（仅在master节点执行一次！）
+# 确保Hadoop集群运行
+start-all.sh
+
+# 检查Hadoop服务状态
+jps
+# 应该在master看到：NameNode, ResourceManager, SecondaryNameNode
+# 在slave看到：DataNode, NodeManager
+
+# 创建HDFS目录
+hdfs dfs -mkdir -p /user/hive/warehouse
+hdfs dfs -mkdir -p /user/hive/tmp
+hdfs dfs -chmod -R 777 /user/hive
+
+# 验证HDFS目录
+hdfs dfs -ls /user/hive
+
+# 初始化元数据库
+cd /usr/local/hive
+schematool -initSchema -dbType postgres
+
+# 如果初始化成功，你会看到类似 "Metastore schema initialized to 4.0.1" 的消息
+
+## 2. 启动Hive服务（仅在master节点执行）
+# 启动Metastore服务
+nohup hive --service metastore &
+
+# 启动HiveServer2服务
+nohup hive --service hiveserver2 &
+
+# 等待几秒钟让服务启动，然后检查
+sleep 10
+jps | grep -E 'RunJar|Hive'
+# 应该看到两个RunJar进程
+
+# 检查HiveServer2 Web UI端口是否监听
+netstat -tlnp | grep 10002
+
+## 3. 配置防火墙（在master节点执行）
+# 开放Hive服务端口
+sudo ufw allow 10000/tcp  # HiveServer2服务端口
+sudo ufw allow 10002/tcp  # Hive Web UI端口
+# 可选：sudo ufw allow 9083/tcp   # Metastore端口
+
+# 检查防火墙状态
+sudo ufw status
+
+# 第四阶段：测试与验证
+# =============================================
+
+## 1. 测试连接（所有节点都可以测试）
+在任何节点执行：
+
+beeline -u jdbc:hive2://node-master:10000 -n asked
+# 在beeline中执行：
+!tables
+
+## 2. 在slave节点测试远程连接
+# 在slave1节点测试
+ssh asked@node-slave1
+beeline -u jdbc:hive2://node-master:10000 -n asked
+!tables
+!quit
+exit
+
+# 在slave2节点测试
+ssh asked@node-slave2
+beeline -u jdbc:hive2://node-master:10000 -n asked
+!tables
+!quit
+exit
+
+# 第五阶段：远程连接说明
+# =============================================
+
+## 远程连接的几种方式：
+
+# 集群内连接：使用节点主机名（如 node-master, node-slave1）
+# 集群外连接：使用节点的IP地址（如 192.168.100.101）
+
+## 连接URL格式：
+# jdbc:hive2://node-master:10000 (集群内使用主机名)
+# jdbc:hive2://192.168.100.101:10000 (集群外使用IP)
+
+## 连接参数说明：
+# - node-master: master节点主机名
+# - 192.168.100.101: master节点IP地址（示例）
+# - 10000: HiveServer2服务端口
+# - asked: 用户名（根据实际修改）
+
+# =============================================
+# 安装完成
+# =============================================

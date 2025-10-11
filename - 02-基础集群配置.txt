@@ -1,0 +1,318 @@
+[file name]: 2基础集群.txt
+[file content begin]
+[File creator 槐鼎昊安]
+
+# ============================================
+# Hadoop 集群基础环境配置指南
+# 三节点集群：1 Master + 2 Slaves
+# Ubuntu Server 24.04.2 - NAT模式网络
+# ============================================
+
+# 网络环境说明：
+# - 使用 NAT 模式与实体机共用路由器网络
+# - 虚拟机网卡：ens33（也可能是ens160、enp0s3、eth0）
+# - 查看IP：ip a
+# - 网关通常为：192.168.x.2
+# - 可用IP范围：192.168.x.2-254
+
+# 1. 主机名配置（每台机器单独执行）
+
+# 1.1 查看当前主机名
+hostnamectl
+# 或
+hostname
+
+# 1.2 设置永久主机名
+# 在 master 节点执行：
+sudo hostnamectl set-hostname node-master
+
+# 在 slave1 节点执行：
+sudo hostnamectl set-hostname node-slave1
+
+# 在 slave2 节点执行：
+sudo hostnamectl set-hostname node-slave2
+
+# 1.3 验证主机名修改
+hostnamectl
+
+# 2. 网络配置（每台机器单独配置）
+
+# 2.1 查看当前网络接口
+ip a
+# 确认网卡名称：ens33、ens160、enp0s3 或 eth0
+
+# 2.2 查找 Netplan 配置文件
+sudo ls /etc/netplan/
+# 常见文件名：00-installer-config.yaml, 01-netcfg.yaml, 50-cloud-init.yaml
+
+# 2.3 备份配置文件（推荐）
+sudo cp /etc/netplan/50-cloud-init.yaml /etc/netplan/50-cloud-init.yaml.backup
+
+# 2.4 编辑 Netplan 配置
+sudo nano /etc/netplan/50-cloud-init.yaml
+
+# 重要规则：
+# 1. 禁止使用 Tab 键，只用空格
+# 2. 每级缩进都是2个空格
+# 3. 冒号 : 后面必须有一个空格
+# 4. 短横线 - 后面必须有一个空格
+# 5. 逗号 , 后面通常有一个空格
+
+# 2.5 配置内容示例（根据实际网络环境修改）
+
+# Master 节点配置 (192.168.100.101)
+network:
+  version: 2
+  ethernets:
+    ens33:
+      dhcp4: no
+      dhcp6: no
+      addresses: [192.168.100.101/24]
+      routes:
+        - to: default
+          via: 192.168.100.2
+      nameservers:
+        addresses: [8.8.8.8, 1.1.1.1, 192.168.100.2]
+        search: [local, home, lan]
+
+# Slave1 节点配置 (192.168.100.102)
+# addresses: [192.168.100.102/24]
+
+# Slave2 节点配置 (192.168.100.103)
+# addresses: [192.168.100.103/24]
+
+# 2.6 保存并退出 Nano
+# Ctrl+X → Y → Enter
+
+# 2.7 应用网络配置
+sudo netplan apply
+
+# 2.8 验证网络配置
+ip a show ens33
+
+# 3. 网络连通性测试
+
+# 3.1 测试配置是否正确
+sudo netplan try
+# 等待提示后按 Enter 确认
+
+# 3.2 重启网络服务（如需要）
+sudo systemctl restart systemd-networkd
+
+# 3.3 完整网络测试
+ping -c 4 192.168.100.2    # 测试网关连通性
+ping -c 4 8.8.8.8          # 测试公网连通性
+ping -c 4 google.com       # 测试DNS解析
+
+# 4. 系统更新和基础配置
+
+# 4.1 更新软件包列表
+sudo apt update
+
+# 4.2 查看可更新软件包
+apt list --upgradable
+
+# 4.3 升级系统（可选）
+sudo apt upgrade -y
+# 或全面升级：sudo apt dist-upgrade -y
+
+# 4.4 清理旧软件包
+sudo apt autoremove
+
+# 4.5 安装基础工具三件套
+sudo apt install -y vim net-tools curl
+
+# 4.6 验证工具安装
+dpkg -l | grep vim
+dpkg -l | grep net-tools
+dpkg -l | grep curl
+
+which vim
+which ifconfig
+which curl
+
+# 5. 主机名解析配置（所有节点）
+
+# 5.1 编辑 hosts 文件
+sudo nano /etc/hosts
+
+# 5.2 添加集群节点映射（所有节点保持一致）
+127.0.0.1       localhost
+192.168.100.101 node-master
+192.168.100.102 node-slave1
+192.168.100.103 node-slave2
+
+# IPv6配置保留
+::1             ip6-localhost ip6-loopback
+fe00::0         ip6-localnet
+ff00::0         ip6-mcastprefix
+ff02::1         ip6-allnodes
+ff02::2         ip6-allrouters
+
+# 5.3 验证主机名解析
+ping -c 4 node-master
+ping -c 4 node-slave1
+ping -c 4 node-slave2
+
+# 6. SSH 免密登录配置（在 master 节点执行）
+
+# 6.1 生成 RSA 密钥对
+ssh-keygen -t rsa
+# 连续按三次回车使用默认设置
+
+# 6.2 分发公钥到所有节点
+ssh-copy-id asked@node-master
+ssh-copy-id asked@node-slave1
+ssh-copy-id asked@node-slave2
+# 每次输入对应用户的密码
+
+# 6.3 验证免密登录
+ssh asked@node-master "hostname" && echo "-> 本机连接成功"
+ssh asked@node-slave1 "hostname" && echo "-> slave1 连接成功"
+ssh asked@node-slave2 "hostname" && echo "-> slave2 连接成功"
+
+# 6.3 ssh免密登录
+# 在 slave 节点上执行（需要手动登录）
+ssh asked@node-slave1
+
+# 6.4 编辑 sudoers 文件
+sudo visudo
+# 在文件末尾添加（把 asked 替换为你的实际用户名）：
+asked ALL=(ALL) NOPASSWD: ALL
+# 保存退出，然后测试
+sudo whoami  # 应该不需要密码
+
+# 7. Java 环境配置（所有节点）
+
+# 7.1 检查当前 Java 安装
+java -version
+which java
+
+# 7.2 查找 Java 安装路径
+readlink -f $(which java)
+# 典型路径：/usr/lib/jvm/java-11-openjdk-amd64
+
+# 7.3 配置环境变量
+nano ~/.bashrc
+
+# 在文件末尾添加：
+export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+export PATH=$JAVA_HOME/bin:$PATH
+
+# 7.4 使配置生效
+source ~/.bashrc
+
+# 7.5 验证 Java 配置
+echo $JAVA_HOME
+java -version
+
+# 8. 防火墙配置（所有节点）
+
+# 8.1 重要警告：先允许SSH再启用防火墙！
+sudo ufw allow ssh
+
+# 8.2 启用防火墙
+sudo ufw enable
+# 提示确认时输入：y
+
+# 8.3 查看防火墙状态
+sudo ufw status verbose
+
+# 9. 时区配置（所有节点）
+
+# 9.1 检查当前时区
+timedatectl
+date
+
+# 9.2 设置时区（设置为亚洲上海时间）
+sudo timedatectl set-timezone Asia/Shanghai
+
+# 9.3 验证时区设置
+timedatectl
+
+# 10. 可选：用户管理
+
+# 10.1 创建新用户（如需要）
+# sudo adduser admin
+
+# 10.2 授予 sudo 权限
+# sudo usermod -aG sudo admin
+
+# 10.3 切换用户测试
+# su - admin
+# sudo apt update
+# exit
+
+# 10.4 删除用户（如需要）
+# sudo deluser --remove-home admin
+
+# 11. 系统重启和清理
+
+# 11.1 重启系统（如内核升级）
+sudo reboot
+
+# 11.2 清理命令历史（模板机清理）
+history -c
+
+# 11.3 删除备份文件
+sudo rm /etc/netplan/50-cloud-init.yaml.backup
+
+# 12. 最终验证
+
+# 12.1 网络连通性验证
+echo "=== 网络连通性测试 ==="
+for node in node-master node-slave1 node-slave2; do
+    echo "测试 $node:"
+    ping -c 2 $node
+    echo "------------------------"
+done
+
+# 12.2 SSH 免密验证
+echo "=== SSH 免密登录测试 ==="
+for node in node-master node-slave1 node-slave2; do
+    echo "SSH 到 $node:"
+    ssh asked@$node "echo '成功连接到: $(hostname); Java: $(java -version 2>&1 | head -1)'"
+    echo "------------------------"
+done
+
+# 12.3 环境变量验证
+echo "=== 环境变量验证 ==="
+for node in node-master node-slave1 node-slave2; do
+    echo "$node 环境变量:"
+    ssh asked@$node "echo 'JAVA_HOME: $JAVA_HOME'; echo 'PATH: $PATH' | grep java"
+    echo "------------------------"
+done
+
+# ============================================
+# 基础集群环境配置完成！
+# 接下来可以配置 Hadoop 集群
+# ============================================
+
+# 常见问题排查：
+
+# 1. Netplan 配置错误：
+#    - 检查缩进：sudo netplan --debug apply
+#    - 验证语法：sudo netplan try
+
+# 2. 网络不通：
+#    - 检查虚拟机网络设置（NAT模式）
+#    - 确认IP地址在同一网段
+#    - 检查防火墙状态
+
+# 3. SSH 连接失败：
+#    - 检查 ~/.ssh 目录权限：chmod 700 ~/.ssh
+#    - 检查密钥权限：chmod 600 ~/.ssh/id_rsa
+#    - 重新分发公钥
+
+# 4. Java 环境问题：
+#    - 确认路径：ls -la $JAVA_HOME
+#    - 重新加载配置：source ~/.bashrc
+
+# 5. 主机名解析失败：
+#    - 检查 /etc/hosts 文件格式
+#    - 确认所有节点配置一致
+
+# 完成所有配置后，可关机作为模板：
+# sudo poweroff
+
+[file content end]

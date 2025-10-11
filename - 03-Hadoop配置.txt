@@ -1,0 +1,193 @@
+[file name]: 3Hadoop配置.txt
+[file content begin]
+[File creator 槐鼎昊安]
+
+# ============================================
+# Hadoop 3.3.6 集群配置指南（三节点：1 Master + 2 Slaves）
+# ============================================
+
+# 1. 开放 Hadoop 所需端口
+# 在 master 节点开放端口
+sudo ufw allow 9000    # HDFS 通信（NameNode RPC）
+sudo ufw allow 9870    # HDFS Web UI（NameNode HTTP）
+sudo ufw allow 8088    # YARN Web UI（ResourceManager）
+sudo ufw allow 8030:8033/tcp  # YARN 资源管理（ResourceManager）
+sudo ufw allow 8040:8042/tcp  # NodeManager Web UI
+
+# 在 slave 节点开放 DataNode Web UI 端口
+ssh asked@node-slave1 "sudo ufw allow 9864"
+ssh asked@node-slave2 "sudo ufw allow 9864"
+
+# 2. 下载并安装 Hadoop（仅在 master 节点执行）
+wget https://archive.apache.org/dist/hadoop/common/hadoop-3.3.6/hadoop-3.3.6.tar.gz
+sudo tar -xzf hadoop-3.3.6.tar.gz -C /usr/local/
+sudo mv /usr/local/hadoop-3.3.6 /usr/local/hadoop
+sudo chown -R asked:asked /usr/local/hadoop
+
+# 3. 配置 Hadoop 环境变量（所有节点）
+nano ~/.bashrc
+
+# 在文件末尾添加：
+export HADOOP_HOME=/usr/local/hadoop
+export PATH=$HADOOP_HOME/bin:$HADOOP_HOME/sbin:$PATH
+export HADOOP_CONF_DIR=$HADOOP_HOME/etc/hadoop
+export HADOOP_MAPRED_HOME=$HADOOP_HOME
+export HADOOP_COMMON_HOME=$HADOOP_HOME
+export HADOOP_HDFS_HOME=$HADOOP_HOME
+export YARN_HOME=$HADOOP_HOME
+
+# 使配置生效
+source ~/.bashrc
+
+# 4. 配置 Hadoop 核心文件（在 master 节点操作）
+cd /usr/local/hadoop/etc/hadoop/
+
+# 4.1 core-site.xml
+nano core-site.xml
+# 内容如下：
+<configuration>
+    <property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://node-master:9000</value>
+    </property>
+    <property>
+        <name>hadoop.tmp.dir</name>
+        <value>/usr/local/hadoop/tmp</value>
+    </property>
+</configuration>
+
+# 4.2 hdfs-site.xml
+nano hdfs-site.xml
+<configuration>
+    <property>
+        <name>dfs.replication</name>
+        <value>2</value>
+    </property>
+    <property>
+        <name>dfs.namenode.name.dir</name>
+        <value>/usr/local/hadoop/hdfs/name</value>
+    </property>
+    <property>
+        <name>dfs.datanode.data.dir</name>
+        <value>/usr/local/hadoop/hdfs/data</value>
+    </property>
+    <property>
+        <name>dfs.datanode.http.address</name>
+        <value>0.0.0.0:9864</value>
+    </property>
+</configuration>
+
+# 4.3 mapred-site.xml
+nano mapred-site.xml
+<configuration>
+    <property>
+        <name>mapreduce.framework.name</name>
+        <value>yarn</value>
+    </property>
+    <property>
+        <name>mapreduce.jobhistory.address</name>
+        <value>node-master:10020</value>
+    </property>
+</configuration>
+
+# 4.4 yarn-site.xml
+nano yarn-site.xml
+<configuration>
+    <property>
+        <name>yarn.resourcemanager.hostname</name>
+        <value>node-master</value>
+    </property>
+    <property>
+        <name>yarn.nodemanager.aux-services</name>
+        <value>mapreduce_shuffle</value>
+    </property>
+</configuration>
+
+# 4.5 workers 文件
+nano workers
+# 删除 localhost，添加：
+node-slave1
+node-slave2
+
+# 4.6 hadoop-env.sh
+nano hadoop-env.sh
+# CTRL+W 找到修改或添加(50行)：
+export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+
+# 5. 分发 Hadoop 到 slave 节点
+# 5.1 创建目录并设置权限
+ssh asked@node-slave1 "sudo mkdir -p /usr/local/hadoop; sudo chown -R asked:asked /usr/local/hadoop"
+ssh asked@node-slave2 "sudo mkdir -p /usr/local/hadoop; sudo chown -R asked:asked /usr/local/hadoop"
+
+# 5.2 分发 Hadoop 文件
+scp -r /usr/local/hadoop/* asked@node-slave1:/usr/local/hadoop/
+scp -r /usr/local/hadoop/* asked@node-slave2:/usr/local/hadoop/
+
+# 5.3 分发环境变量
+scp ~/.bashrc asked@node-slave1:~/
+scp ~/.bashrc asked@node-slave2:~/
+ssh asked@node-slave1 "source ~/.bashrc"
+ssh asked@node-slave2 "source ~/.bashrc"
+
+# 6. 验证环境配置
+# 在所有节点执行：
+echo $JAVA_HOME
+echo $HADOOP_HOME
+hadoop version
+
+# 7. 格式化 HDFS（仅在 master 节点执行一次！）
+hdfs namenode -format
+
+# 8. 启动 Hadoop 集群
+start-all.sh
+
+# 或分别启动：
+# start-dfs.sh
+# start-yarn.sh
+
+# 9. 验证集群状态
+# 9.1 查看进程
+jps
+# Master 应有：NameNode, ResourceManager, SecondaryNameNode
+# Slave 应有：DataNode, NodeManager
+
+# 9.2 查看 HDFS 状态
+hdfs dfsadmin -report
+
+# 9.3 查看 YARN 状态
+yarn node -list
+
+# 9.4 检查存储
+hdfs dfs -df -h
+
+# 10. 访问 Web 界面
+# HDFS: http://node-master:9870
+# YARN: http://node-master:8088
+# DataNode: http://node-slave1:9864 或 http://node-slave2:9864
+
+# 11. 常见问题排查
+# 11.1 检查端口是否监听
+netstat -tlnp | grep java
+
+# 11.2 查看日志
+tail -f $HADOOP_HOME/logs/hadoop-asked-namenode-node-master.log
+tail -f $HADOOP_HOME/logs/hadoop-asked-datanode-node-slave1.log
+
+# 11.3 测试 HDFS 读写
+hdfs dfs -mkdir /test
+hdfs dfs -put /etc/hosts /test/
+hdfs dfs -ls /test
+
+# 12. 关闭集群
+stop-all.sh
+# 13. 1 注：用主机名访问，可以在你的电脑上配置：
+Windows: 修改 C:\Windows\System32\drivers\etc\hosts
+Mac/Linux: 修改 /etc/hosts
+# 13.2  添加节点主机名和对应IP的映射：
+192.168.100.101 node-master
+192.168.100.102 node-slave1
+192.168.100.103 node-slave2
+
+# ============================================
+# 配置完成！
+# ============================================

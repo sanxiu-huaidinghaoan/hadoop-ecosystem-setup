@@ -1,0 +1,134 @@
+[file name]: 00组件兼容性指南.txt
+[file content begin]
+[File creator 槐鼎昊安]
+
+# =============================================
+# 大数据组件兼容性指南与生产环境规划
+# =============================================
+
+# 核心组件版本兼容性
+# =============================================
+
+组件			推荐版本		兼容范围		关键说明
+Hadoop		3.3.6			3.1.0 - 3.4.x	必须使用 Hadoop 3.x
+Hive			4.0.1			4.0.x			兼容 Hadoop 3.3.6
+JDK			11			8, 11			推荐 JDK 11，不支持 JDK 17+
+PostgreSQL	13.12		11.x - 15.x		避免使用 PostgreSQL 16+
+Spark		3.3.3			3.0.x - 3.5.x	关键：匹配 Hive-Spark 版本
+HBase		2.4.18		2.2.x - 2.5.x	需要对应 HBase Storage Handler
+Hue			4.11.0		4.10.x - 4.12.x	需要适配 Hive 4.x 语法
+Zookeeper	3.8.3			3.4.x - 3.8.x	元数据高可用需要
+JDBC: 		42.6.0 
+gitlab
+Keepalived	防止gitlab的主节点宕机 自动切换从节点 主节点修复后自动传回
+
+# 节点角色分配规划
+# =============================================
+
+节点1: NameNode + ResourceManager + HMaster + GitLab + Kafka
+节点2: SecondaryNameNode + NodeManager + RegionServer + Hive
+节点3: NodeManager + RegionServer + Spark + ZooKeeper
+节点4: NodeManager + RegionServer + Kafka + PostgreSQL
+节点5: NodeManager + RegionServer + Kafka + Flume
+节点6: 监控节点 (Prometheus + Grafana + ELK)
+
+可选扩展组件：
+- Mahout / Spark MLlib (机器学习)
+- Oozie (工作流调度器) 
+- zookeeper (选举服务)
+- Storm / Flink (实时处理)
+
+# 最小生产环境硬件配置
+# =============================================
+
+组件		CPU	内存		存储		节点数
+HDFS	8核	32GB	4TB HDD	3+
+HBase	16核	64GB	2TB SSD	3+
+Spark	16核	64GB	1TB SSD	3+
+Kafka	8核	32GB	2TB SSD	3+
+
+# 分阶段实施规划
+# =============================================
+hadoop, hive, postgresql, zookeeper，hbase, kafka, spark，Scala pyspark , Spark MLlib, 
+Prometheus, grafana, Alertmanager, Airflow, Apache Hue, ELK, Thanos, Flink, gitlab, keeplived
+Apache Atlas, Apache Ranger.	ModSecurity + Nginx   MinIO 
+
+# 安装Minio (比装Hadoop简单100倍)
+wget https://dl.min.io/server/minio/release/linux-amd64/minio
+chmod +x minio
+mkdir ~/minio-data
+./minio server ~/minio-data --console-address ":9001"
+
+# 访问 http://你的IP:9001
+# 账号: minioadmin
+# 密码: minioadmin
+
+
+# 覆盖的能力范围：
+# =============================================
+
+ 数据存储：HDFS, HBase, PostgreSQL, MinIO
+ 数据处理：Spark, Flink, Hive
+ 数据流：	 afka, Airflow  
+ 数据治理：Atlas, Ranger
+ 监控运维：Prometheus, Grafana, ELK
+ 开发协作：GitLab
+ 安全防护：Nginx+ModSecurity
+ 高可用 ：	 Keepalived
+
+
+# 完整技术栈汇总
+# =============================================
+
+组件统计
+按类别统计
+bash
+## 存储层 (4个)
+#1. Hadoop HDFS
+#2. PostgreSQL  
+#3. HBase
+#4. MinIO
+
+## 计算层 (4个)
+#5. Spark
+#6. Spark MLlib
+#7. Flink
+#8. Scala/PySpark (算在Spark生态内)
+
+## 数据流与消息 (2个)
+#9. Kafka
+#10. Airflow
+
+## 数据仓库与查询 (2个)
+#11. Hive
+#12. Apache Hue
+
+##协调与元数据 (3个)
+#13. ZooKeeper
+#14. Apache Atlas
+#15. Apache Ranger
+
+## 监控告警 (6个)
+#16. Prometheus
+#17. Grafana
+#18. Alertmanager
+#19. ELK Stack (3合1：Elasticsearch, Logstash, Kibana)
+#20. Thanos
+
+## 安全与入口 (2个)
+#21. ModSecurity + Nginx
+#22. Keepalived
+
+## 开发运维 (2个)
+#23. GitLab
+#24. ELK中的Logstash
+
+# =============================================
+# 部署注意事项
+# =============================================
+
+1. 版本匹配: 确保 Hadoop 3.3.6 + Hive 4.0.1 + JDK 11 的核心组合
+2. 网络配置: 确保各节点间网络通畅，防火墙规则正确
+3. 存储规划: 根据数据量合理分配 HDD 和 SSD
+4. 监控先行: 部署初期即建立完整的监控体系
+5. 安全基线: 从第一期开始实施基础安全措施

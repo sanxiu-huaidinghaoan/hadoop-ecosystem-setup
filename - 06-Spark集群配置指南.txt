@@ -1,0 +1,311 @@
+[file name]: - 06-Spark集群配置指南.txt
+[file content begin]
+[File creator 槐鼎昊安]
+
+# ============================================
+# Spark 3.3.3 集群完整配置指南
+# 三节点集群：1 Master + 2 Slaves
+# 包含 PySpark 和 MLlib 支持
+# ============================================
+
+## 配置完成状态检查：
+# Spark 集群已运行
+# History Server 已启动 (端口 18080)
+# HDFS 目录已创建
+# Python 虚拟环境配置完成
+# MLlib 依赖包安装完成
+
+$访问地址：
+Spark Master: http://192.168.100.101:8080
+Spark History: http://192.168.100.101:18080
+HDFS NameNode: http://192.168.100.101:9870
+
+============================================
+
+# 第一阶段：Spark 安装配置（Master节点）
+# ============================================
+
+## 1. 下载安装
+cd /tmp
+wget https://archive.apache.org/dist/spark/spark-3.3.3/spark-3.3.3-bin-hadoop3.tgz
+sudo tar -xzf spark-3.3.3-bin-hadoop3.tgz -C /usr/local/
+sudo mv /usr/local/spark-3.3.3-bin-hadoop3 /usr/local/spark
+sudo chown -R asked:asked /usr/local/spark
+
+mkdir -p /usr/local/spark/logs
+mkdir -p /usr/local/spark/work
+
+## 2. 环境变量配置
+nano ~/.bashrc
+
+# 添加内容：
+export SPARK_HOME=/usr/local/spark
+export PATH=$SPARK_HOME/bin:$SPARK_HOME/sbin:$PATH
+export PYSPARK_PYTHON=python3
+export PYSPARK_DRIVER_PYTHON=python3
+export SPARK_CONF_DIR=$SPARK_HOME/conf
+export HADOOP_CONF_DIR=$HADOOP_HOME/etc/hadoop
+export YARN_CONF_DIR=$HADOOP_HOME/etc/hadoop
+
+source ~/.bashrc
+
+============================================
+
+# 第二阶段：Spark 核心配置
+# ============================================
+
+## 1. 创建配置文件
+cd /usr/local/spark/conf
+cp spark-env.sh.template spark-env.sh
+cp spark-defaults.conf.template spark-defaults.conf
+cp log4j2.properties.template log4j2.properties
+cp workers.template workers
+
+## 2. 配置 spark-env.sh
+nano spark-env.sh
+
+# 添加内容：
+export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+export HADOOP_HOME=/usr/local/hadoop
+export HADOOP_CONF_DIR=$HADOOP_HOME/etc/hadoop
+export YARN_CONF_DIR=$HADOOP_HOME/etc/hadoop
+export SPARK_MASTER_HOST=node-master
+export SPARK_MASTER_PORT=7077
+export SPARK_MASTER_WEBUI_PORT=8080
+export SPARK_WORKER_CORES=2
+export SPARK_WORKER_MEMORY=2g
+export SPARK_WORKER_INSTANCES=1
+export SPARK_LOG_DIR=/usr/local/spark/logs
+export SPARK_WORKER_DIR=/usr/local/spark/work
+export SPARK_LOCAL_IP=$(hostname -I | awk '{print $1}')
+export SPARK_DAEMON_MEMORY=1g
+export PYSPARK_PYTHON=/home/asked/spark-venv/bin/python3
+export PYSPARK_DRIVER_PYTHON=/home/asked/spark-venv/bin/python3
+
+## 3. 配置 spark-defaults.conf
+nano spark-defaults.conf
+
+# 添加内容：
+spark.master                     spark://node-master:7077
+spark.serializer                 org.apache.spark.serializer.KryoSerializer
+spark.driver.memory              2g
+spark.executor.memory            2g
+spark.executor.cores             2
+spark.default.parallelism        64
+spark.sql.adaptive.enabled       true
+spark.sql.adaptive.coalescePartitions.enabled true
+spark.dynamicAllocation.enabled  true
+spark.shuffle.service.enabled    true
+
+# History Server 配置
+spark.eventLog.enabled           true
+spark.eventLog.dir               hdfs://node-master:9000/spark-logs
+spark.history.fs.logDirectory    hdfs://node-master:9000/spark-logs
+
+## 4. 配置 workers 文件
+nano workers
+
+# 删除 localhost，添加：
+node-master
+node-slave1
+node-slave2
+
+============================================
+
+# 第三阶段：Python 环境配置（所有节点）
+# ============================================
+
+## 1. Master 节点配置
+python3 -m venv /home/asked/spark-venv
+source /home/asked/spark-venv/bin/activate
+pip install setuptools pyspark==3.3.3 numpy pandas scikit-learn matplotlib seaborn
+deactivate
+
+echo 'export SPARK_VENV_PATH="/home/asked/spark-venv"' >> ~/.bashrc
+echo 'export PYSPARK_PYTHON="$SPARK_VENV_PATH/bin/python3"' >> ~/.bashrc
+echo 'export PYSPARK_DRIVER_PYTHON="$SPARK_VENV_PATH/bin/python3"' >> ~/.bashrc
+source ~/.bashrc
+
+## 2. Slave 节点配置
+# 安装 python3-venv（如果需要）
+ssh asked@node-slave1 "sudo apt update && sudo apt install -y python3-venv"
+ssh asked@node-slave2 "sudo apt update && sudo apt install -y python3-venv"
+
+# 配置虚拟环境
+ssh asked@node-slave1 '
+python3 -m venv /home/asked/spark-venv
+/home/asked/spark-venv/bin/pip install setuptools pyspark==3.3.3 numpy pandas scikit-learn matplotlib seaborn
+echo "export SPARK_VENV_PATH=/home/asked/spark-venv" >> ~/.bashrc
+echo "export PYSPARK_PYTHON=\$SPARK_VENV_PATH/bin/python3" >> ~/.bashrc
+echo "export PYSPARK_DRIVER_PYTHON=\$SPARK_VENV_PATH/bin/python3" >> ~/.bashrc
+'
+
+ssh asked@node-slave2 '
+python3 -m venv /home/asked/spark-venv
+/home/asked/spark-venv/bin/pip install setuptools pyspark==3.3.3 numpy pandas scikit-learn matplotlib seaborn
+echo "export SPARK_VENV_PATH=/home/asked/spark-venv" >> ~/.bashrc
+echo "export PYSPARK_PYTHON=\$SPARK_VENV_PATH/bin/python3" >> ~/.bashrc
+echo "export PYSPARK_DRIVER_PYTHON=\$SPARK_VENV_PATH/bin/python3" >> ~/.bashrc
+'
+
+============================================
+
+# 第四阶段：分发配置到 Slave 节点
+# ============================================
+
+## 1. 创建目录
+ssh asked@node-slave1 "sudo mkdir -p /usr/local/spark/conf && sudo chown -R asked:asked /usr/local/spark"
+ssh asked@node-slave2 "sudo mkdir -p /usr/local/spark/conf && sudo chown -R asked:asked /usr/local/spark"
+
+## 2. 分发 Spark 文件
+scp -r /usr/local/spark/* asked@node-slave1:/usr/local/spark/
+scp -r /usr/local/spark/* asked@node-slave2:/usr/local/spark/
+
+## 3. 分发环境变量
+scp ~/.bashrc asked@node-slave1:~/
+scp ~/.bashrc asked@node-slave2:~/
+ssh asked@node-slave1 "source ~/.bashrc"
+ssh asked@node-slave2 "source ~/.bashrc"
+
+## 4. 验证分发
+ssh asked@node-slave1 "ls -la /usr/local/spark/bin/spark-shell"
+ssh asked@node-slave2 "ls -la /usr/local/spark/bin/spark-shell"
+
+============================================
+
+# 第五阶段：HDFS 目录准备
+# ============================================
+
+## 1. 启动 Hadoop 并创建目录
+start-dfs.sh
+sleep 10
+
+# 退出安全模式（如果需要）
+hdfs dfsadmin -safemode leave
+
+# 创建 Spark 目录
+hdfs dfs -mkdir -p /spark-logs
+hdfs dfs -mkdir -p /spark-jars
+hdfs dfs -chmod -R 755 /spark-logs
+hdfs dfs -chmod -R 755 /spark-jars
+
+# 验证目录
+hdfs dfs -ls /
+
+============================================
+
+# 第六阶段：启动 Spark 集群
+# ============================================
+
+## 1. 启动服务
+cd /usr/local/spark
+./sbin/start-master.sh
+sleep 5
+./sbin/start-workers.sh
+sleep 10
+./sbin/start-history-server.sh
+
+## 2. 检查进程
+jps | grep -E 'Master|Worker|HistoryServer'
+ssh asked@node-slave1 "jps | grep Worker"
+ssh asked@node-slave2 "jps | grep Worker"
+
+============================================
+
+# 第七阶段：防火墙配置
+# ============================================
+
+# 所有节点执行
+sudo ufw allow 7077/tcp    # Spark Master 内部通信
+sudo ufw allow 8080/tcp    # Spark Master Web UI
+sudo ufw allow 8081/tcp    # Spark Worker Web UI
+sudo ufw allow 18080/tcp   # Spark History Server
+sudo ufw allow 4040/tcp    # Spark Application UI
+
+sudo ufw status
+
+============================================
+
+# 第八阶段：验证安装
+# ============================================
+
+## 1. 基础验证
+# 检查进程
+jps
+
+# 测试 Spark Shell
+spark-shell --master spark://node-master:7077 << EOF
+println("Spark version: " + sc.version)
+val rdd = sc.parallelize(1 to 1000)
+println("数据计数: " + rdd.count())
+:quit
+EOF
+
+# 测试 PySpark
+pyspark --master spark://node-master:7077 << EOF
+df = spark.range(1000)
+print("PySpark 测试通过，数据行数:", df.count())
+df.show(5)
+exit()
+EOF
+
+## 2. Python 环境验证
+/home/asked/spark-venv/bin/python3 -c "
+import pyspark, numpy, pandas, sklearn, matplotlib, seaborn
+print('✓ PySpark:', pyspark.__version__)
+print('✓ NumPy:', numpy.__version__)
+print('✓ Pandas:', pandas.__version__)
+print('所有 MLlib 依赖包安装成功!')
+"
+
+============================================
+
+# 第九阶段：常见问题解决
+# ============================================
+
+## 1. History Server 空页面问题
+# 运行一个 Spark 作业生成事件日志
+spark-submit --master spark://node-master:7077 --class org.apache.spark.examples.SparkPi /usr/local/spark/examples/jars/spark-examples_2.12-3.3.3.jar 50
+
+# 检查 HDFS 日志
+hdfs dfs -ls /spark-logs
+
+## 2. HDFS 安全模式问题
+hdfs dfsadmin -safemode get
+hdfs dfsadmin -safemode leave
+
+## 3. Python distutils 缺失
+/home/asked/spark-venv/bin/pip install setuptools
+
+============================================
+
+# 第十阶段：生产环境优化建议
+# ============================================
+
+# 在 spark-defaults.conf 中根据硬件调整：
+spark.executor.memory              4g
+spark.driver.memory                2g
+spark.executor.cores               4
+spark.sql.adaptive.enabled         true
+
+============================================
+
+##完成状态确认
+
+1. Spark Master: http://192.168.100.101:8080
+2. Spark History: http://192.168.100.101:18080  
+3. 3个Worker节点运行正常
+4. Python 虚拟环境配置完成
+5. MLlib 机器学习库可用
+6. HDFS 集成正常
+
+##注意事项：
+1. History Server 需要运行 Spark 作业后才能显示内容
+2. 确保所有节点的 /etc/hosts 文件配置正确
+3. 防火墙端口需要正确开放
+4. Python 虚拟环境路径在所有节点必须一致
+
+# ============================================
+# Spark 集群配置完成！
+# ============================================
+[file content end]

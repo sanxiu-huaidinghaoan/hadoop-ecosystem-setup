@@ -1,0 +1,552 @@
+[file name]: 5ZooKeeper+HBase+Kafka 集群配置手册.txt
+[file content begin]
+[File creator 槐鼎昊安]
+
+============================================
+ZooKeeper + HBase + Kafka 集群配置手册
+============================================
+
+📋 目录
+1. 环境准备
+2. ZooKeeper 集群配置
+3. HBase 集群配置  
+4. Kafka 集群配置
+5. 服务启动与验证
+6. 服务停止
+7. 防火墙配置
+
+============================================
+
+1. 环境准备
+------------
+- 节点规划：
+  * node-master (主节点)
+  * node-slave1 (从节点1) 
+  * node-slave2 (从节点2)
+- 用户：asked
+- 确保节点间SSH免密登录配置完成
+
+============================================
+
+2. ZooKeeper 集群配置
+=====================
+
+2.1 下载和安装
+--------------
+# 在 master 节点操作
+cd /tmp
+wget https://downloads.apache.org/zookeeper/zookeeper-3.8.4/apache-zookeeper-3.8.4-bin.tar.gz
+# 备用镜像
+# wget https://archive.apache.org/dist/zookeeper/zookeeper-3.8.4/apache-zookeeper-3.8.4-bin.tar.gz
+
+# 解压和设置权限
+sudo tar -xzf apache-zookeeper-3.8.4-bin.tar.gz -C /usr/local/
+sudo mv /usr/local/apache-zookeeper-3.8.4-bin /usr/local/zookeeper
+sudo chown -R asked:asked /usr/local/zookeeper
+
+2.2 验证下载
+-----------
+ls -la /tmp/*zookeeper*
+file /tmp/apache-zookeeper-*-bin.tar.gz
+
+2.3 配置 ZooKeeper
+-----------------
+cd /usr/local/zookeeper
+
+# 创建目录
+mkdir -p data
+mkdir -p logs
+
+# 验证目录结构
+ls -la  # 应该看到: bin/ conf/ data/ docs/ lib/ logs/
+
+# 复制配置文件
+cp conf/zoo_sample.cfg conf/zoo.cfg
+nano conf/zoo.cfg
+
+zoo.cfg 内容：
+----------------------------------------
+tickTime=2000
+initLimit=10
+syncLimit=5
+dataDir=/usr/local/zookeeper/data
+dataLogDir=/usr/local/zookeeper/logs
+clientPort=2181
+
+# 集群服务器配置
+server.1=node-master:2888:3888
+server.2=node-slave1:2888:3888
+server.3=node-slave2:2888:3888
+
+# 优化配置
+maxClientCnxns=60
+autopurge.snapRetainCount=3
+autopurge.purgeInterval=1
+----------------------------------------
+
+2.4 配置 myid 文件
+-----------------
+# master 节点
+echo "1" > /usr/local/zookeeper/data/myid
+
+# slave1 节点
+ssh asked@node-slave1
+echo "2" > /usr/local/zookeeper/data/myid
+exit
+
+# slave2 节点
+ssh asked@node-slave2  
+echo "3" > /usr/local/zookeeper/data/myid
+exit
+
+2.5 分发到所有节点
+-----------------
+# 在 slave 节点创建目录
+ssh asked@node-slave1 "sudo mkdir -p /usr/local/zookeeper; sudo chown -R asked:asked /usr/local/zookeeper"
+ssh asked@node-slave2 "sudo mkdir -p /usr/local/zookeeper; sudo chown -R asked:asked /usr/local/zookeeper"
+
+# 传输文件
+rsync -avz /usr/local/zookeeper/ asked@node-slave1:/usr/local/zookeeper/
+rsync -avz /usr/local/zookeeper/ asked@node-slave2:/usr/local/zookeeper/
+
+# 备用命令
+# scp -r /usr/local/zookeeper/* asked@node-slave1:/usr/local/zookeeper/
+# scp -r /usr/local/zookeeper/* asked@node-slave2:/usr/local/zookeeper/
+
+# 验证传输
+ssh asked@node-slave1 "ls -la /usr/local/zookeeper/"
+ssh asked@node-slave2 "ls -la /usr/local/zookeeper/"
+
+2.6 配置环境变量
+---------------
+# 所有节点执行
+nano ~/.bashrc
+
+添加内容：
+----------------------------------------
+# ZooKeeper Configuration
+export ZOOKEEPER_HOME=/usr/local/zookeeper
+export PATH=$ZOOKEEPER_HOME/bin:$PATH
+----------------------------------------
+
+source ~/.bashrc
+echo $ZOOKEEPER_HOME
+
+============================================
+
+3. HBase 集群配置
+=================
+
+3.1 下载和安装
+--------------
+cd /tmp
+wget https://archive.apache.org/dist/hbase/2.4.18/hbase-2.4.18-bin.tar.gz
+tar -xzf hbase-2.4.18-bin.tar.gz
+sudo mv hbase-2.4.18 /usr/local/hbase
+sudo chown -R asked:asked /usr/local/hbase
+
+3.2 配置 HBase
+--------------
+cd /usr/local/hbase/conf
+
+# 配置 hbase-site.xml
+nano hbase-site.xml
+
+hbase-site.xml 内容：
+----------------------------------------
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+  <property>
+    <name>hbase.rootdir</name>
+    <value>hdfs://node-master:9000/hbase</value>
+    <description>HBase数据存储的HDFS路径</description>
+  </property>
+  <property>
+    <name>hbase.cluster.distributed</name>
+    <value>true</value>
+    <description>启用分布式集群模式</description>
+  </property>
+  <property>
+    <name>hbase.zookeeper.quorum</name>
+    <value>node-master,node-slave1,node-slave2</value>
+    <description>ZooKeeper集群节点列表</description>
+  </property>
+  <property>
+    <name>hbase.zookeeper.property.dataDir</name>
+    <value>/usr/local/zookeeper/data</value>
+    <description>ZooKeeper数据存储目录</description>
+  </property>
+  <property>
+    <name>hbase.unsafe.stream.capability.enforce</name>
+    <value>false</value>
+    <description>解决Hadoop 3.x兼容性问题</description>
+  </property>
+  <property>
+    <name>hbase.regionserver.handler.count</name>
+    <value>53</value>
+    <description>RegionServer并发请求处理器数量</description>
+  </property>
+  <property>
+    <name>hbase.master.info.port</name>
+    <value>16010</value>
+    <description>HBase Master Web界面访问端口</description>
+  </property>
+</configuration>
+----------------------------------------
+
+# 配置 regionservers
+nano regionservers
+内容：
+node-slave1
+node-slave2
+
+# 配置 backup masters
+nano backup-masters  
+内容：
+node-master
+
+3.3 配置环境变量
+---------------
+# 所有节点执行
+nano ~/.bashrc
+
+添加内容：
+----------------------------------------
+# HBase Configuration
+export HBASE_HOME=/usr/local/hbase
+export PATH=$HBASE_HOME/bin:$PATH
+----------------------------------------
+
+source ~/.bashrc
+echo $HBASE_HOME
+
+3.4 分发到所有节点
+-----------------
+# 在 slave 节点创建目录
+ssh asked@node-slave1 "sudo mkdir -p /usr/local/hbase; sudo chown -R asked:asked /usr/local/hbase"
+ssh asked@node-slave2 "sudo mkdir -p /usr/local/hbase; sudo chown -R asked:asked /usr/local/hbase"
+
+# 传输文件
+scp -r /usr/local/hbase/* asked@node-slave1:/usr/local/hbase/
+scp -r /usr/local/hbase/* asked@node-slave2:/usr/local/hbase/
+
+# 验证传输
+ssh asked@node-slave1 "ls -la /usr/local/hbase/"
+ssh asked@node-slave2 "ls -la /usr/local/hbase/"
+
+3.5 配置 Java 路径
+-----------------
+nano /usr/local/hbase/conf/hbase-env.sh
+
+修改：
+export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+
+# 分发配置到所有节点
+scp /usr/local/hbase/conf/hbase-env.sh asked@node-slave1:/usr/local/hbase/conf/
+scp /usr/local/hbase/conf/hbase-env.sh asked@node-slave2:/usr/local/hbase/conf/
+
+============================================
+
+4. Kafka 集群配置
+=================
+
+4.1 下载和安装
+--------------
+cd /tmp
+wget https://downloads.apache.org/kafka/3.8.0/kafka_2.13-3.8.0.tgz
+
+# 解压和安装
+tar -xzf kafka_2.13-3.8.0.tgz
+sudo mkdir -p /usr/local/kafka
+sudo chown -R asked:asked /usr/local/kafka
+mv kafka_2.13-3.8.0/* /usr/local/kafka/
+
+# 创建日志目录
+mkdir -p /usr/local/kafka/logs
+
+4.2 在 slave 节点创建目录
+-----------------------
+ssh asked@node-slave1 "mkdir -p /usr/local/kafka/logs; sudo chown -R asked:asked /usr/local/kafka"
+ssh asked@node-slave2 "mkdir -p /usr/local/kafka/logs; sudo chown -R asked:asked /usr/local/kafka"
+
+4.3 配置 Kafka
+--------------
+cd /usr/local/kafka/config
+nano server.properties
+
+各节点配置差异：
+----------------------------------------
+Master节点 (broker.id=0):
+  broker.id=0
+  listeners=PLAINTEXT://node-master:9092
+  advertised.listeners=PLAINTEXT://node-master:9092
+
+Slave1节点 (broker.id=1):
+  broker.id=1  
+  listeners=PLAINTEXT://node-slave1:9092
+  advertised.listeners=PLAINTEXT://node-slave1:9092
+
+Slave2节点 (broker.id=2):
+  broker.id=2
+  listeners=PLAINTEXT://node-slave2:9092
+  advertised.listeners=PLAINTEXT://node-slave2:9092
+----------------------------------------
+
+通用配置：
+----------------------------------------
+log.dirs=/usr/local/kafka/logs
+num.partitions=3
+offsets.topic.replication.factor=2
+transaction.state.log.replication.factor=2
+zookeeper.connect=node-master:2181,node-slave1:2181,node-slave2:2181
+
+# 优化配置
+log.cleanup.policy=delete
+default.replication.factor=2
+min.insync.replicas=2
+transaction.state.log.min.isr=2
+zookeeper.session.timeout.ms=18000
+batch.size=16384
+linger.ms=5
+message.max.bytes=10485760
+replica.socket.timeout.ms=30000
+replica.socket.receive.buffer.bytes=65536
+controller.socket.timeout.ms=30000
+auto.leader.rebalance.enable=false
+----------------------------------------
+
+4.4 分发和配置 slave 节点
+-----------------------------
+# 分发 Kafka
+scp -r /usr/local/kafka/* asked@node-slave1:/usr/local/kafka/
+scp -r /usr/local/kafka/* asked@node-slave2:/usr/local/kafka/
+
+# 修改 slave1 配置
+ssh asked@node-slave1 "sed -i 's/broker.id=0/broker.id=1/g; s/node-master:9092/node-slave1:9092/g; s/advertised.listeners=PLAINTEXT:\\/\\/node-master:9092/advertised.listeners=PLAINTEXT:\\/\\/node-slave1:9092/g' /usr/local/kafka/config/server.properties"
+
+# 修改 slave2 配置  
+ssh asked@node-slave2 "sed -i 's/broker.id=0/broker.id=2/g; s/node-master:9092/node-slave2:9092/g; s/advertised.listeners=PLAINTEXT:\\/\\/node-master:9092/advertised.listeners=PLAINTEXT:\\/\\/node-slave2:9092/g' /usr/local/kafka/config/server.properties"
+-------------------------------------------------
+========================================
+
+4.4.3-4.4.1或者可以使用单节点配置分发辅节点，单独修改差异部分
+---------------------------------------------------------------------------
+#1配置 master 节点的 server.properties
+# 1.1使用 sed 安全修改配置
+sed -i 's/^broker.id=.*/broker.id=0/g' server.properties
+sed -i 's|^log.dirs=.*|log.dirs=/usr/local/kafka/logs|g' server.properties
+sed -i 's/^num.partitions=.*/num.partitions=3/g' server.properties
+sed -i 's/^offsets.topic.replication.factor=.*/offsets.topic.replication.factor=2/g' server.properties
+sed -i 's/^transaction.state.log.replication.factor=.*/transaction.state.log.replication.factor=2/g' server.properties
+sed -i 's|^zookeeper.connect=.*|zookeeper.connect=node-master:2181,node-slave1:2181,node-slave2:2181|g' server.properties
+sed -i 's/^#listeners=PLAINTEXT.*/listeners=PLAINTEXT:\/\/node-master:9092/g' server.properties
+
+# 1.2在文件末尾添加新配置
+echo "" >> server.properties
+echo "# ===== 新增优化配置 =====" >> server.properties
+echo "advertised.listeners=PLAINTEXT://node-master:9092" >> server.properties
+echo "default.replication.factor=2" >> server.properties
+echo "min.insync.replicas=2" >> server.properties
+echo "transaction.state.log.min.isr=2" >> server.properties
+---------------
+#2验证修改
+# 2.1检查修改是否正确
+grep -E "broker.id|listeners|log.dirs|zookeeper.connect" server.properties
+
+#2.2分发到 slave 节点
+# 在 slave 节点创建目录
+ssh asked@node-slave1 "sudo mkdir -p /usr/local/kafka; sudo chown -R asked:asked /usr/local/kafka"
+ssh asked@node-slave2 "sudo mkdir -p /usr/local/kafka; sudo chown -R asked:asked /usr/local/kafka"
+
+# 分发整个 Kafka 目录
+scp -r /usr/local/kafka/* asked@node-slave1:/usr/local/kafka/
+scp -r /usr/local/kafka/* asked@node-slave2:/usr/local/kafka/
+------------------------------
+
+#3修改 slave 节点的配置
+# slave1: broker.id=1
+ssh asked@node-slave1 "sed -i 's/broker.id=0/broker.id=1/g; s/node-master:9092/node-slave1:9092/g; s/advertised.listeners=PLAINTEXT:\\/\\/node-master:9092/advertised.listeners=PLAINTEXT:\\/\\/node-slave1:9092/g' /usr/local/kafka/config/server.properties"
+
+# slave2: broker.id=2
+ssh asked@node-slave2 "sed -i 's/broker.id=0/broker.id=2/g; s/node-master:9092/node-slave2:9092/g; s/advertised.listeners=PLAINTEXT:\\/\\/node-master:9092/advertised.listeners=PLAINTEXT:\\/\\/node-slave2:9092/g' /usr/local/kafka/config/server.properties"
+
+#3.1验证 slave 节点配置
+ssh asked@node-slave1 "grep -E 'broker.id|listeners|advertised.listeners' /usr/local/kafka/config/server.properties"
+ssh asked@node-slave2 "grep -E 'broker.id|listeners|advertised.listeners' /usr/local/kafka/config/server.properties"
+---------------------------------------------------------------------------------------------------------------------------------------
+
+#重要配置说明
+---------------
+
+# 数据安全相关
+# min.insync.replicas=2 - 确保消息写入至少2个副本才算成功
+# default.replication.factor=2 - 每个分区有2个副本
+# offsets.topic.replication.factor=2 - 消费者偏移量安全
+
+# 性能优化
+# batch.size=16384 - 合理的批处理大小
+# linger.ms=5 - 平衡延迟和吞吐量
+# message.max.bytes=10485760 - 允许10MB大消息
+
+# 运维友好
+# log.retention.hours=168 - 自动清理7天前数据
+# log.segment.bytes=1073741824 - 控制日志段文件大小
+---------------------------------------------------------------
+
+4.5 配置环境变量
+---------------
+# 所有节点执行
+nano ~/.bashrc
+
+添加内容：
+----------------------------------------
+# Kafka Configuration
+export KAFKA_HOME=/usr/local/kafka
+export PATH=$KAFKA_HOME/bin:$PATH
+----------------------------------------
+
+source ~/.bashrc
+echo $KAFKA_HOME
+
+============================================
+
+5. 服务启动与验证
+=================
+
+5.1 启动顺序
+-----------
+1. Hadoop (HDFS + YARN)
+2. ZooKeeper 集群
+3.  Hive服务
+4. HBase 集群
+5. Kafka 集群
+
+5.2 启动命令
+-----------
+# 启动 HDFS 和 YARN
+start-all.sh
+sleep 10
+
+# 启动 ZooKeeper 集群
+ssh asked@node-master "$ZOOKEEPER_HOME/bin/zkServer.sh start"
+ssh asked@node-slave1 "$ZOOKEEPER_HOME/bin/zkServer.sh start"  
+ssh asked@node-slave2 "$ZOOKEEPER_HOME/bin/zkServer.sh start"
+
+sleep 5
+# 检查状态
+ssh asked@node-master "$ZOOKEEPER_HOME/bin/zkServer.sh status"
+ssh asked@node-slave1 "$ZOOKEEPER_HOME/bin/zkServer.sh status"
+ssh asked@node-slave2 "$ZOOKEEPER_HOME/bin/zkServer.sh status"
+
+#hive Metastore,HiveServer2服务
+nohup hive --service metastore &
+nohup hive --service hiveserver2 &
+
+sleep 10
+
+jps | grep -E 'RunJar|Hive'
+netstat -tlnp | grep 10002
+
+sleep 5
+
+# 启动 HBase
+$HBASE_HOME/bin/start-hbase.sh
+sleep 10
+
+# 验证 HBase
+jps | grep -E 'HMaster|HRegionServer'
+echo "status" | $HBASE_HOME/bin/hbase shell 2>/dev/null | head -5
+
+# 启动 Kafka 集群
+ssh asked@node-master "nohup $KAFKA_HOME/bin/kafka-server-start.sh $KAFKA_HOME/config/server.properties > /dev/null 2>&1 &"
+ssh asked@node-slave1 "nohup $KAFKA_HOME/bin/kafka-server-start.sh $KAFKA_HOME/config/server.properties > /dev/null 2>&1 &"
+ssh asked@node-slave2 "nohup $KAFKA_HOME/bin/kafka-server-start.sh $KAFKA_HOME/config/server.properties > /dev/null 2>&1 &"
+
+sleep 15
+
+5.3 验证脚本
+-----------
+#!/bin/bash
+echo "=== 三大组件健康检查 ==="
+
+echo "1. ZooKeeper 状态:"
+ssh asked@node-master "$ZOOKEEPER_HOME/bin/zkServer.sh status"
+ssh asked@node-slave1 "$ZOOKEEPER_HOME/bin/zkServer.sh status" 
+ssh asked@node-slave2 "$ZOOKEEPER_HOME/bin/zkServer.sh status"
+
+echo "2. HBase 状态:"
+echo "status" | $HBASE_HOME/bin/hbase shell 2>/dev/null | grep "active"
+
+echo "3. Kafka 状态:"
+$KAFKA_HOME/bin/kafka-topics.sh --list --bootstrap-server node-master:9092 2>/dev/null && echo "Kafka 运行正常"
+
+echo "=== 检查完成 ==="
+
+============================================
+
+6. 服务停止
+===========
+
+6.1 停止顺序
+-----------
+1. Kafka 集群
+2. HBase 集群  
+3. ZooKeeper 集群
+4. Hadoop 集群
+
+6.2 停止命令
+-----------
+# 停止 Kafka
+pkill -f kafka
+sleep 5
+
+# 停止 HBase
+$HBASE_HOME/bin/stop-hbase.sh
+sleep 10
+
+# 停止 ZooKeeper
+$ZOOKEEPER_HOME/bin/zkServer.sh stop
+sleep 5
+
+# 停止 Hadoop
+stop-all.sh
+sleep 5
+
+# 清理残留进程
+pkill -f HMaster
+pkill -f HRegionServer  
+pkill -f HQuorumPeer
+pkill -f Kafka
+
+# 一行命令关闭所有服务
+pkill -f kafka && sleep 5 && $HBASE_HOME/bin/stop-hbase.sh && sleep 10 && $ZOOKEEPER_HOME/bin/zkServer.sh stop && sleep 5 && stop-all.sh && echo "所有服务已停止"
+
+============================================
+
+7. 防火墙配置
+=============
+
+# 所有节点执行
+sudo ufw allow 2181/tcp    # ZooKeeper 客户端端口
+sudo ufw allow 2888/tcp    # ZooKeeper 集群通信
+sudo ufw allow 3888/tcp    # ZooKeeper 选举端口
+
+sudo ufw allow 16010/tcp   # HBase Master Web UI
+sudo ufw allow 16020/tcp   # HBase RegionServer
+sudo ufw allow 16030/tcp   # HBase RegionServer Web UI
+sudo ufw allow 9092/tcp    # Kafka broker
+
+# 检查防火墙状态
+sudo ufw status
+
+============================================
+
+📝 注意事项
+1. 确保所有节点的 hosts 文件正确配置
+2. 确保 SSH 免密登录正常工作
+3. 按照正确的启动和停止顺序操作
+4. 重要配置修改后需要重启相应服务
+5. 定期检查日志文件排查问题
+
+[文件内容结束]
