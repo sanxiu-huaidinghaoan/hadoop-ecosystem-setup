@@ -1,0 +1,828 @@
+# ##############################
+#Hive Metastore 从 PostgreSQL 迁移到 MySQL 完整操作手册
+# 文件编号：09-FINAL
+# ##############################
+
+# ============================================
+# Hive Metastore 从 PostgreSQL 迁移到 MySQL 配置指南
+# 三节点集群：1 Master + 2 Slaves
+# Hive 4.0.1 + MySQL 8.0.46 + Hadoop 3.3.6
+# ============================================
+# [File creator 槐鼎昊安]
+# 建议文件名：09-Hive-Metastore-PostgreSQL迁移MySQL配置指南.txt
+# ============================================
+
+# 迁移目标：
+# 将 Hive 元数据库从 PostgreSQL 16 迁移到 MySQL 8.0
+# 统一密码：asdfghjkl;'
+# 保留原 PostgreSQL 数据（只停用不删除，可回退）
+
+# 前提条件：
+# ✓ Hadoop 集群正常运行（HDFS + YARN）
+# ✓ 三节点 SSH 免密登录已配置
+# ✓ 统一密码 asdfghjkl;' 已确定
+# ✓ 所有节点时间同步
+
+# ============================================
+# 第一阶段：环境确认（master 节点）
+# ============================================
+
+# 1. 确认当前用户和主机
+whoami
+hostname
+echo $HIVE_HOME
+ls /usr/local/hive/conf/hive-site.xml
+
+# 理想输出：
+# asked
+# node-master
+# /usr/local/hive
+# /usr/local/hive/conf/hive-site.xml
+
+# 2. 确认 PostgreSQL 和 Hive 运行状态
+sudo systemctl status postgresql --no-pager
+ps -ef | grep -E 'postgres' | grep -v grep
+sudo netstat -tlnp | grep 5432
+jps | grep -E 'RunJar|Hive'
+
+# 理想输出：
+# PostgreSQL 状态 active (exited)，有 postgres 主进程
+# 5432 端口监听
+# 两个 RunJar 进程（Metastore + HiveServer2）
+
+# 3. 确认 Hive 中是否有数据
+beeline -u jdbc:hive2://node-master:10000 -n asked -e "SHOW DATABASES;"
+hdfs dfs -ls /user/hive/warehouse/
+
+# 理想输出（无数据场景）：
+# +----------------+
+# | database_name  |
+# +----------------+
+# | default        |
+# +----------------+
+# 1 row selected
+# ls: `/user/hive/warehouse/': No such file or directory
+
+# 4. 判断结论
+# 只有 default 库，warehouse 目录不存在 → 无数据，可直接迁移
+# 有业务库或 warehouse 有数据 → 需要先备份或迁移
+
+# ============================================
+# 第二阶段：停止旧服务（master 节点）
+# ============================================
+
+# 1. 停止 Hive 服务
+pkill -f metastore
+pkill -f hiveserver2
+sleep 3
+jps | grep -E 'RunJar|Hive'
+
+# 理想输出：无输出（无残留）
+
+# 如有残留：
+pkill -9 -f RunJar
+jps | grep RunJar
+
+# 2. 停止 PostgreSQL
+sudo systemctl stop postgresql
+sudo systemctl disable postgresql
+sudo systemctl status postgresql --no-pager | head -5
+
+# 理想输出：
+# ○ postgresql.service - PostgreSQL RDBMS
+#      Loaded: loaded (/usr/lib/systemd/system/postgresql.service; disabled; preset: enabled)
+#      Active: inactive (dead) since ...
+
+# 3. 确认端口全部释放
+sudo netstat -tlnp | grep 5432
+sudo netstat -tlnp | grep -E '10000|10002|9083'
+ps -ef | grep postgres | grep -v grep
+
+# 理想输出：三条都无输出
+
+# ⚠️ 注意：PostgreSQL 只是停用，不删除，数据还在，万一要回退还能启用
+
+# ============================================
+# 第三阶段：安装 MySQL 8.0（master 节点）
+# ============================================
+
+# 1. 安装 MySQL Server
+sudo apt update
+sudo apt install -y mysql-server
+
+# 2. 启动并设置开机自启
+sudo systemctl enable --now mysql
+sudo systemctl status mysql --no-pager | head -10
+
+# 理想输出：
+# ● mysql.service - MySQL Community Server
+#      Loaded: loaded (/usr/lib/systemd/system/mysql.service; enabled; preset: enabled)
+#      Active: active (running) since ...
+#    Main PID: xxxxx (mysqld)
+#      Status: "Server is operational"
+
+# 3. 验证端口和版本
+sudo netstat -tlnp | grep 3306
+mysql --version
+
+# 理想输出：
+# tcp   0   0 127.0.0.1:33060   0.0.0.0:*   LISTEN   xxxxx/mysqld
+# tcp   0   0 127.0.0.1:3306    0.0.0.0:*   LISTEN   xxxxx/mysqld
+# mysql  Ver 8.0.46-0ubuntu0.24.04.4 for Linux on x86_64 ((Ubuntu))
+
+# ⚠️ 注意：只监听 127.0.0.1:3306（本机），Hive 和 MySQL 同机，最安全
+
+# ============================================
+# 第四阶段：MySQL 安全初始化（master 节点）
+# ============================================
+
+# 1. 运行安全初始化向导
+sudo mysql_secure_installation
+
+# 逐项选择：
+# VALIDATE PASSWORD component?          → n
+# root 密码                              → 自动跳过（Ubuntu 用 auth_socket）
+# Remove anonymous users?                → y
+# Disallow root login remotely?          → y
+# Remove test database and access to it? → y
+# Reload privilege tables now?           → y
+#
+# 看到 All done! 完成
+
+# ⚠️ 注意：Ubuntu 24.04 的 MySQL 8 默认给 root 用 auth_socket 插件
+# 所以向导会跳过 root 密码设置，需要单独改
+
+# 2. 修改 root 密码为 mysql_native_password
+sudo mysql
+
+# 在 MySQL 中执行：
+ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY "asdfghjkl;'";
+FLUSH PRIVILEGES;
+EXIT;
+
+# 理想输出：
+# Query OK, 0 rows affected (0.02 sec)
+# Query OK, 0 rows affected (0.01 sec)
+# Bye
+
+# ⚠️ 关键：BY "asdfghjkl;'" 里的内容才是密码，双引号外只留一个分号作为 SQL 结束符
+# 多打一个分号会变成 12 字符密码
+
+# 3. 验证 root 密码登录
+mysql -u root -p
+# 输入密码 asdfghjkl;'
+
+# 进入后执行：
+SELECT user, host, plugin FROM mysql.user WHERE user='root';
+SHOW DATABASES;
+EXIT;
+
+# 理想输出：
+# +------+-----------+-----------------------+
+# | user | host      | plugin                |
+# +------+-----------+-----------------------+
+# | root | localhost | mysql_native_password |
+# +------+-----------+-----------------------+
+#
+# +--------------------+
+# | Database           |
+# +--------------------+
+# | information_schema |
+# | mysql              |
+# | performance_schema |
+# | sys                |
+# +--------------------+
+# 4 rows in set
+
+# ⚠️ 注意：没有 test 库（已被移除），这是正常的
+
+# ============================================
+# 第五阶段：创建 Hive 元数据库和用户（master 节点）
+# ============================================
+
+# 1. 用 root 登录
+mysql -u root -p
+# 输密码 asdfghjkl;'
+
+# 2. 逐条执行 SQL
+CREATE DATABASE hive_metastore
+  CHARACTER SET utf8
+  COLLATE utf8_general_ci;
+
+CREATE USER 'hive'@'%' IDENTIFIED WITH mysql_native_password BY "asdfghjkl;'";
+
+GRANT ALL PRIVILEGES ON hive_metastore.* TO 'hive'@'%';
+
+CREATE USER 'hive'@'localhost' IDENTIFIED WITH mysql_native_password BY "asdfghjkl;'";
+
+GRANT ALL PRIVILEGES ON hive_metastore.* TO 'hive'@'localhost';
+
+FLUSH PRIVILEGES;
+
+# 理想输出：
+# Query OK, 1 row affected, 2 warnings (0.01 sec)
+# Query OK, 0 rows affected (0.02 sec)
+# Query OK, 0 rows affected (0.01 sec)
+# Query OK, 0 rows affected (0.00 sec)
+# Query OK, 0 rows affected (0.00 sec)
+# Query OK, 0 rows affected (0.01 sec)
+
+# ⚠️ 关于 2 warnings：utf8 是 utf8mb3 的别名，MySQL 8 会提示一下，功能正常
+
+# ⚠️ 为什么建两个用户：
+# hive@'%'         → JDBC 连接匹配（Hive 通过 JDBC 连）
+# hive@'localhost' → 命令行 mysql 客户端匹配（会被 MySQL 识别为 localhost）
+# 少了任何一个，都会出现 Access denied
+
+# 3. 验证
+SHOW DATABASES;
+SELECT user, host, plugin FROM mysql.user WHERE user='hive';
+EXIT;
+
+# 理想输出：
+# +--------------------+
+# | Database           |
+# +--------------------+
+# | hive_metastore     |
+# | information_schema |
+# | mysql              |
+# | performance_schema |
+# | sys                |
+# +--------------------+
+#
+# +------+-----------+-----------------------+
+# | user | host      | plugin                |
+# +------+-----------+-----------------------+
+# | hive | %         | mysql_native_password |
+# | hive | localhost | mysql_native_password |
+# +------+-----------+-----------------------+
+
+# 4. 用 hive 用户测试连接
+mysql -u hive -p -h 127.0.0.1 -e "SHOW DATABASES;"
+# 输密码 asdfghjkl;'
+
+# 理想输出：
+# +--------------------+
+# | Database           |
+# +--------------------+
+# | hive_metastore     |
+# | information_schema |
+# | performance_schema |
+# +--------------------+
+
+# ============================================
+# 第六阶段：下载 MySQL JDBC 驱动（master 节点）
+# ============================================
+
+# 1. 下载
+cd /tmp
+wget https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.0.33/mysql-connector-j-8.0.33.jar
+ls -lh /tmp/mysql-connector-j-8.0.33.jar
+file /tmp/mysql-connector-j-8.0.33.jar
+
+# 理想输出：
+# -rw-r--r-- 1 asked asked 2.4M ... /tmp/mysql-connector-j-8.0.33.jar
+# /tmp/mysql-connector-j-8.0.33.jar: Java archive data (JAR)
+
+# 2. 复制到 Hive lib
+sudo cp /tmp/mysql-connector-j-8.0.33.jar /usr/local/hive/lib/
+sudo chown asked:asked /usr/local/hive/lib/mysql-connector-j-8.0.33.jar
+ls -l /usr/local/hive/lib/mysql-connector-j-8.0.33.jar
+
+# 理想输出：
+# -rw-r--r-- 1 asked asked 2481560 ... /usr/local/hive/lib/mysql-connector-j-8.0.33.jar
+
+# ⚠️ 关键：必须用 8.0.x 新版 mysql-connector-j，不是旧版 mysql-connector-java-5.x
+# 旧版驱动 + MySQL 8 会出现 Unknown system variable 'query_cache_size'
+
+# ============================================
+# 第七阶段：修改 hive-site.xml（master 节点）
+# ============================================
+
+# 1. 备份
+cp /usr/local/hive/conf/hive-site.xml /usr/local/hive/conf/hive-site.xml.postgres.bak
+ls -l /usr/local/hive/conf/hive-site.xml*
+
+# 理想输出：
+# -rw-rw-r-- 1 asked asked 3129 ... hive-site.xml
+# -rw-rw-r-- 1 asked asked 3129 ... hive-site.xml.postgres.bak
+
+# 2. 查看当前 JDO 配置
+grep -n -A3 'javax.jdo' /usr/local/hive/conf/hive-site.xml
+
+# 理想输出（改前）：
+# 6:  <name>javax.jdo.option.ConnectionURL</name>
+# 7-  <value>jdbc:postgresql://localhost:5432/hive</value>
+# 13- <value>org.postgresql.Driver</value>
+# 19- <value>hive</value>
+# 25- <value>asdfghjkl;'</value>
+
+# 3. 修改 URL 和驱动类
+cd /usr/local/hive/conf
+
+sed -i 's|jdbc:postgresql://localhost:5432/hive|jdbc:mysql://localhost:3306/hive_metastore?createDatabaseIfNotExist=true\&useSSL=false\&allowPublicKeyRetrieval=true\&characterEncoding=UTF-8\&serverTimezone=Asia/Shanghai|' hive-site.xml
+
+sed -i 's|org.postgresql.Driver|com.mysql.cj.jdbc.Driver|' hive-site.xml
+
+sed -i 's|PostgreSQL metastore connection URL|MySQL metastore connection URL|' hive-site.xml
+sed -i 's|PostgreSQL JDBC driver class|MySQL JDBC driver class|' hive-site.xml
+
+# 4. ⚠️ 关键修复：XML 中 & 转义
+sed -i 's|&useSSL|\&amp;useSSL|g; s|&allowPublicKeyRetrieval|\&amp;allowPublicKeyRetrieval|g; s|&characterEncoding|\&amp;characterEncoding|g; s|&serverTimezone|\&amp;serverTimezone|g' hive-site.xml
+
+# ⚠️ 必须做这一步，否则 XML 里会出现裸 &，Hive 启动时报：
+# org.xml.sax.SAXParseException: The entity name must immediately follow the '&'
+
+# 5. 验证修改
+grep -n -A3 'javax.jdo' hive-site.xml
+
+# 理想输出：
+# 6:  <name>javax.jdo.option.ConnectionURL</name>
+# 7-  <value>jdbc:mysql://localhost:3306/hive_metastore?createDatabaseIfNotExist=true&amp;useSSL=false&amp;allowPublicKeyRetrieval=true&amp;characterEncoding=UTF-8&amp;serverTimezone=Asia/Shanghai</value>
+# 8-  <description>MySQL metastore connection URL</description>
+# 9-  </property>
+# --
+# 12: <name>javax.jdo.option.ConnectionDriverName</name>
+# 13- <value>com.mysql.cj.jdbc.Driver</value>
+# 14- <description>MySQL JDBC driver class</description>
+# --
+# 18: <name>javax.jdo.option.ConnectionUserName</name>
+# 19- <value>hive</value>
+# --
+# 24: <name>javax.jdo.option.ConnectionPassword</name>
+# 25- <value>asdfghjkl;'</value>
+
+# ⚠️ 注意：第 7 行 URL 里的 4 个 & 必须都变成 &amp;
+
+# 6. XML 语法校验
+python3 -c "import xml.dom.minidom; xml.dom.minidom.parse('/usr/local/hive/conf/hive-site.xml'); print('XML OK')"
+
+# 理想输出：XML OK
+
+# ============================================
+# 第八阶段：分发配置到从节点（master 节点执行）
+# ============================================
+
+# 分发 hive-site.xml
+scp /usr/local/hive/conf/hive-site.xml asked@node-slave1:/usr/local/hive/conf/
+scp /usr/local/hive/conf/hive-site.xml asked@node-slave2:/usr/local/hive/conf/
+
+# 分发 JDBC 驱动
+scp /usr/local/hive/lib/mysql-connector-j-8.0.33.jar asked@node-slave1:/usr/local/hive/lib/
+scp /usr/local/hive/lib/mysql-connector-j-8.0.33.jar asked@node-slave2:/usr/local/hive/lib/
+
+# 验证
+ssh asked@node-slave1 "ls -l /usr/local/hive/lib/mysql-connector-j-8.0.33.jar; grep -c mysql /usr/local/hive/conf/hive-site.xml"
+ssh asked@node-slave2 "ls -l /usr/local/hive/lib/mysql-connector-j-8.0.33.jar; grep -c mysql /usr/local/hive/conf/hive-site.xml"
+
+# 理想输出：
+# -rw-r--r-- 1 asked asked 2481560 ... /usr/local/hive/lib/mysql-connector-j-8.0.33.jar
+# 2
+# -rw-r--r-- 1 asked asked 2481560 ... /usr/local/hive/lib/mysql-connector-j-8.0.33.jar
+# 2
+
+# ⚠️ 注意：3 个节点都要有驱动和配置，slave 分发不能忘
+
+# ============================================
+# 第九阶段：初始化 MySQL 元数据库（master 节点）
+# ============================================
+
+# 1. 确认 Hadoop 状态
+jps
+
+# master 应有：NameNode、SecondaryNameNode、ResourceManager
+# slave 应有：DataNode、NodeManager
+
+# 如缺 ResourceManager：
+start-yarn.sh
+sleep 10
+jps | grep -E 'ResourceManager|NodeManager'
+
+# 2. 确认 Hive 已停
+jps | grep -E 'RunJar|Hive'
+
+# 理想输出：无输出
+
+# 3. 初始化元数据库
+cd /usr/local/hive
+schematool -initSchema -dbType mysql
+
+# 理想输出：
+# Initializing the schema to: 4.0.0
+# Metastore connection URL:        jdbc:mysql://localhost:3306/hive_metastore?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
+# Metastore connection Driver :    com.mysql.cj.jdbc.Driver
+# Metastore connection User:       hive
+# Starting metastore schema initialization to 4.0.0
+# Initialization script hive-schema-4.0.0.mysql.sql
+# Initialization script completed
+# schemaTool completed
+
+# ⚠️ 关于 4.0.0：Hive 4.0.1 用的是 4.0.0 的 schema 脚本，正常
+# SLF4J 警告可忽略
+
+# 4. 验证 MySQL 中已建表
+mysql -u hive -p -h 127.0.0.1
+# 输密码 asdfghjkl;'
+
+# 进入后：
+USE hive_metastore;
+SELECT COUNT(*) AS table_count FROM information_schema.tables WHERE table_schema='hive_metastore';
+SELECT * FROM VERSION;
+SHOW TABLES;
+EXIT;
+
+# 理想输出：
+# +-------------+
+# | table_count |
+# +-------------+
+# |          83 |
+# +-------------+
+#
+# +--------+----------------+----------------------------+
+# | VER_ID | SCHEMA_VERSION | VERSION_COMMENT            |
+# +--------+----------------+----------------------------+
+# |      1 | 4.0.0          | Hive release version 4.0.0 |
+# +--------+----------------+----------------------------+
+#
+# （83 张表名，包括 BUCKETING_COLS、DBS、TBLS、PARTITIONS、VERSION 等）
+
+# ⚠️ 注意：如果报 Table already exists，说明 MySQL 里已有旧 schema
+# 解决：DROP DATABASE hive_metastore 后重建，再重新 schematool
+
+# ============================================
+# 第十阶段：启动 Hive 并验证（master 节点）
+# ============================================
+
+# 1. 创建日志目录并启动
+mkdir -p /usr/local/hive/logs
+
+nohup hive --service metastore > /usr/local/hive/logs/metastore.log 2>&1 &
+sleep 5
+
+nohup hive --service hiveserver2 > /usr/local/hive/logs/hiveserver2.log 2>&1 &
+sleep 30
+
+# 2. 验证进程和端口
+jps | grep -E 'RunJar|Hive'
+sudo netstat -tlnp | grep -E '10000|10002|9083'
+
+# 理想输出：
+# 263138 RunJar
+# 263312 RunJar
+#
+# tcp6   0   0 :::10002    :::*   LISTEN   263312/java
+# tcp6   0   0 :::10000    :::*   LISTEN   263312/java
+# tcp6   0   0 :::9083     :::*   LISTEN   263138/java
+
+# ⚠️ HiveServer2 首次启动要 30~60 秒，15 秒不够
+
+# 3. 本机连接测试
+beeline -u jdbc:hive2://node-master:10000 -n asked
+
+# 在 beeline 中执行：
+SHOW DATABASES;
+CREATE DATABASE test_db;
+USE test_db;
+CREATE TABLE t1(id INT, name STRING);
+SHOW TABLES;
+!quit
+
+# 理想输出：
+# +----------------+
+# | database_name  |
+# +----------------+
+# | default        |
+# +----------------+
+#
+# No rows affected
+# No rows affected
+# No rows affected
+#
+# +-----------+
+# | tab_name  |
+# +-----------+
+# | t1        |
+# +-----------+
+
+# ============================================
+# 第十一阶段：修复 HDFS DataNode（如需要）
+# ============================================
+
+# 1. 症状
+# INSERT 报错：
+# File /user/hive/tmp/.../dummy_file could only be written to 0 of the 1 minReplication nodes. There are 0 datanode(s) running
+
+# 2. 诊断
+hdfs dfsadmin -report | head -25
+
+# 异常输出：
+# Configured Capacity: 0 (0 B)
+# ...
+# Dead datanodes (2):
+# Name: 192.168.100.102:9866 (node-slave1)
+# Name: 192.168.100.103:9866 (node-slave2)
+
+# 3. 检查 slave 进程
+ssh asked@node-slave1 "jps"
+ssh asked@node-slave2 "jps"
+
+# 异常输出：只有 Jps，没有 DataNode、NodeManager
+
+# 4. 启动 Hadoop
+start-dfs.sh
+sleep 15
+start-yarn.sh
+sleep 10
+
+jps
+ssh asked@node-slave1 "jps"
+ssh asked@node-slave2 "jps"
+
+# 理想输出：
+# master: NameNode、SecondaryNameNode、ResourceManager
+# slave1: DataNode、NodeManager
+# slave2: DataNode、NodeManager
+
+# 5. 验证 HDFS
+hdfs dfsadmin -report | head -25
+
+# 理想输出：
+# Configured Capacity: 81791614976 (76.17 GB)
+# Live datanodes (2):
+# Name: 192.168.100.102:9866 (node-slave1)
+# Name: 192.168.100.103:9866 (node-slave2)
+
+# ⚠️ 注意：HDFS DataNode 必须先启动，否则 INSERT 会失败
+
+# ============================================
+# 第十二阶段：修复 YARN MapReduce 配置（如需要）
+# ============================================
+
+# 1. 症状
+# INSERT 走 MR 作业时失败：
+# ERROR : Ended Job = job_xxx with errors
+# ERROR : FAILED: Execution Error, return code 2 from ... MapRedTask
+# number of mappers: 0; number of reducers: 0
+
+# 2. 诊断
+yarn logs -applicationId application_xxx 2>/dev/null | grep -E 'Error|Exception|Caused by' | head -30
+
+# 典型错误：
+# Error: Could not find or load main class org.apache.hadoop.mapreduce.v2.app.MRAppMaster
+# Caused by: java.lang.ClassNotFoundException: org.apache.hadoop.mapreduce.v2.app.MRAppMaster
+
+# 3. 修复 A：mapred-site.xml 加 3 个 property
+nano /usr/local/hadoop/etc/hadoop/mapred-site.xml
+
+# 在 <configuration> 内，</configuration> 之前添加：
+    <property>
+        <name>yarn.app.mapreduce.am.env</name>
+        <value>HADOOP_MAPRED_HOME=/usr/local/hadoop</value>
+    </property>
+    <property>
+        <name>mapreduce.map.env</name>
+        <value>HADOOP_MAPRED_HOME=/usr/local/hadoop</value>
+    </property>
+    <property>
+        <name>mapreduce.reduce.env</name>
+        <value>HADOOP_MAPRED_HOME=/usr/local/hadoop</value>
+    </property>
+
+# 4. 修复 B：yarn-site.xml 加 env-whitelist
+nano /usr/local/hadoop/etc/hadoop/yarn-site.xml
+
+# 在 <configuration> 内，</configuration> 之前添加：
+    <property>
+        <name>yarn.nodemanager.env-whitelist</name>
+        <value>JAVA_HOME,HADOOP_COMMON_HOME,HADOOP_HDFS_HOME,HADOOP_CONF_DIR,CLASSPATH_PREPEND_DISTCACHE,HADOOP_YARN_HOME,HADOOP_MAPRED_HOME</value>
+    </property>
+
+# 5. 分发并重启 YARN
+scp /usr/local/hadoop/etc/hadoop/mapred-site.xml asked@node-slave1:/usr/local/hadoop/etc/hadoop/
+scp /usr/local/hadoop/etc/hadoop/mapred-site.xml asked@node-slave2:/usr/local/hadoop/etc/hadoop/
+scp /usr/local/hadoop/etc/hadoop/yarn-site.xml asked@node-slave1:/usr/local/hadoop/etc/hadoop/
+scp /usr/local/hadoop/etc/hadoop/yarn-site.xml asked@node-slave2:/usr/local/hadoop/etc/hadoop/
+
+# 验证
+ssh asked@node-slave1 "grep -c HADOOP_MAPRED_HOME /usr/local/hadoop/etc/hadoop/mapred-site.xml; grep -c env-whitelist /usr/local/hadoop/etc/hadoop/yarn-site.xml"
+ssh asked@node-slave2 "grep -c HADOOP_MAPRED_HOME /usr/local/hadoop/etc/hadoop/mapred-site.xml; grep -c env-whitelist /usr/local/hadoop/etc/hadoop/yarn-site.xml"
+
+# 重启
+stop-yarn.sh
+sleep 5
+start-yarn.sh
+sleep 10
+
+jps | grep -E 'ResourceManager|NodeManager'
+ssh asked@node-slave1 "jps | grep NodeManager"
+ssh asked@node-slave2 "jps | grep NodeManager"
+
+# 理想输出：
+# 3
+# 1
+# 3
+# 1
+#
+# 266680 ResourceManager
+# 71412 NodeManager
+# 44541 NodeManager
+
+# ⚠️ 两个坑，缺一不可：
+# - mapred-site.xml 缺 HADOOP_MAPRED_HOME → MRAppMaster 类找不到
+# - yarn-site.xml 缺 env-whitelist → 容器里没传递 HADOOP_MAPRED_HOME
+
+# ============================================
+# 第十三阶段：最终验证
+# ============================================
+
+# 完整流程测试
+beeline -u jdbc:hive2://node-master:10000 -n asked -e "USE test_db; INSERT INTO t1 VALUES (1, 'hello'); INSERT INTO t1 VALUES (2, 'world'); SELECT * FROM t1;"
+
+# 理想输出（关键几行）：
+# INFO  : Stage-Stage-1: Map: 1  Reduce: 1   Cumulative CPU: 16.06 sec   HDFS Read: 21791 HDFS Write: 233 HDFS EC Read: 0 SUCCESS
+# INFO  : Total MapReduce CPU Time Spent: 16 seconds 60 msec
+# INFO  : Table test_db.t1 stats: [numFiles=1, numRows=1, totalSize=8, rawDataSize=7, numFilesErasureCoded=0]
+# No rows affected (55.108 seconds)
+#
+# +--------+----------+
+# | t1.id  | t1.name  |
+# +--------+----------+
+# | 1      | hello    |
+# +--------+----------+
+# | 2      | world    |
+# +--------+----------+
+# 2 rows selected
+
+# 从节点远程测试
+ssh asked@node-slave1
+beeline -u jdbc:hive2://node-master:10000 -n asked -e "SELECT * FROM test_db.t1;"
+exit
+
+# 理想输出：同样能看到 2 行数据
+
+# ============================================
+# 第十四阶段：常见问题排查
+# ============================================
+
+# 1. Access denied for user 'hive'@'localhost'
+#    原因：只建了 hive@'%'，但命令行客户端被识别为 localhost
+#    解决：
+CREATE USER 'hive'@'localhost' IDENTIFIED WITH mysql_native_password BY "asdfghjkl;'";
+GRANT ALL PRIVILEGES ON hive_metastore.* TO 'hive'@'localhost';
+FLUSH PRIVILEGES;
+
+# 2. Public Key Retrieval is not allowed
+#    原因：MySQL 8 默认 caching_sha2
+#    解决：用户用 mysql_native_password；或 URL 加 allowPublicKeyRetrieval=true
+
+# 3. Unknown system variable 'query_cache_size'
+#    原因：用了旧版 5.x 驱动
+#    解决：换 mysql-connector-j-8.0.33.jar
+
+# 4. The entity name must immediately follow the '&'
+#    原因：XML 里裸 &
+#    解决：改成 &amp;
+
+# 5. Table already exists (schematool)
+#    原因：MySQL 里已有旧 schema
+#    解决：
+DROP DATABASE hive_metastore;
+CREATE DATABASE hive_metastore CHARACTER SET utf8 COLLATE utf8_general_ci;
+#    然后重新 schematool -initSchema -dbType mysql
+
+# 6. -> 提示符卡住
+#    原因：在 mysql> 里输了 shell 命令
+#    解决：输入 \c 取消，再 exit 退出
+
+# 7. Driver class not found
+#    原因：驱动没放对位置
+#    解决：所有节点 /usr/local/hive/lib/ 都要有 jar
+
+# 8. DataNode 全部 Dead
+#    原因：slave 上 Hadoop 未启动
+#    解决：start-dfs.sh、start-yarn.sh
+
+# 9. MR 报 ClassNotFoundException: MRAppMaster
+#    原因：mapred-site.xml 缺 HADOOP_MAPRED_HOME
+#    解决：加 3 个 env property（见第十二阶段）
+
+# 10. MR 还找不到类（加了 3 个 property 后）
+#     原因：yarn-site.xml 缺 env-whitelist，容器里没传递 HADOOP_MAPRED_HOME
+#     解决：加 yarn.nodemanager.env-whitelist（见第十二阶段）
+
+# ============================================
+# 第十五阶段：密码特殊字符处理指南
+# ============================================
+
+# 密码：asdfghjkl;'
+# 特殊字符：分号 ; 和单引号 '
+
+# 【场景 1】交互式输入（最安全）
+# 直接输，系统不解析
+mysql -u root -p
+# Enter password: asdfghjkl;'
+
+# 【场景 2】SQL 里设置密码
+# 用双引号包裹：末尾只留一个分号作为 SQL 结束符
+ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY "asdfghjkl;'";
+#                                                                            ^^ 双引号里是密码
+#                                                                              ^ 双引号外的分号是 SQL 结束符
+
+# 【场景 3】shell 变量/脚本
+# 用单引号包裹，内部单引号用 '\'' 转义：
+'asdfghjkl;'\'''
+
+# 【场景 4】JDBC URL 参数
+# XML 里 & 要写 &amp;
+# '、; 不用转义
+
+# 【场景 5】hive-site.xml 的 <value>
+# 直接用，XML 里 '、; 是普通字符
+
+# 【最佳实践】
+# 1. 所有交互式操作都用 -p 后回车再输密码
+# 2. 永远不在命令行里直接写密码
+# 3. SQL 里设置密码时，末尾只留一个分号
+# 4. XML 里 & 必须写成 &amp;
+
+# ============================================
+# 第十六阶段：迁移完成检查清单
+# ============================================
+
+# | 项目              | 命令                                                          | 期望         |
+# |-------------------|---------------------------------------------------------------|--------------|
+# | MySQL 运行        | systemctl is-active mysql                                     | active       |
+# | MySQL 端口        | netstat -tlnp | grep 3306                                    | 监听         |
+# | hive_metastore 库 | mysql -u hive -p -e "SHOW DATABASES;"                         | 包含该库     |
+# | 元数据表数量      | SELECT COUNT(*) FROM information_schema.tables ...            | 83           |
+# | schema 版本       | SELECT * FROM VERSION;                                        | 4.0.0        |
+# | JDBC 驱动         | ls /usr/local/hive/lib/mysql-connector-j-8.0.33.jar          | 存在(3节点)  |
+# | hive-site.xml     | grep mysql /usr/local/hive/conf/hive-site.xml                 | 有匹配       |
+# | XML 合法          | python3 -c "xml.dom.minidom.parse('...')"                     | XML OK       |
+# | Hive 进程         | jps | grep RunJar                                             | 两个 RunJar  |
+# | Hive 端口         | netstat -tlnp | grep -E '10000|10002|9083'                   | 都监听       |
+# | HDFS DataNode     | hdfs dfsadmin -report                                         | Live 2 nodes |
+# | YARN Node         | yarn node -list                                               | RUNNING 2    |
+# | Beeline 连接      | beeline -u jdbc:hive2://node-master:10000 -n asked            | 能进         |
+# | INSERT 测试       | INSERT INTO t1 VALUES (1, 'hello');                           | 成功         |
+# | SELECT 测试       | SELECT * FROM t1;                                             | 有数据       |
+
+# 【第十七阶段】关键要点总结（共 18 条）
+# ============================================
+# 1. PostgreSQL 只是停用，不删除，可回退
+# 2. MySQL root 密码用 mysql_native_password 插件
+# 3. hive 用户要建两个：@'%' 和 @'localhost'
+# 4. JDBC 驱动用 mysql-connector-j-8.0.33.jar（不是旧版 5.x）
+# 5. XML 里 & 必须写 &amp;
+# 6. 改完一定要 XML 校验
+# 7. 3 个节点都要有驱动和配置# 8. schematool 初始化只跑一次
+# 9. mapred-site.xml 必须有 3 个 HADOOP_MAPRED_HOME property
+# 10. yarn-site.xml 必须有 env-whitelist
+# 11. HDFS DataNode 必须先启动
+# 12. HiveServer2 首次启动要 30~60 秒
+# 13. Hive Metastore 切换后 HDFS warehouse 要重建
+# 14. MySQL 8 建库必须指定 utf8 字符集
+# 15. JDBC URL 必须加 allowPublicKeyRetrieval=true 和 serverTimezone
+# 16. Ubuntu 24.04 的 MySQL 8 默认 root 用 auth_socket，需手动改密码
+# 17. HiveServer2 端口是 10000，Web UI 是 10002，Metastore 是 9083
+# 18. 换元数据库后，Hive 里原有的库/表信息不会自动迁移
+
+# 【第十八阶段】日常运维命令
+# ============================================
+# 【启动顺序】
+start-dfs.sh
+start-yarn.sh
+nohup hive --service metastore > /usr/local/hive/logs/metastore.log 2>&1 &
+sleep 5
+nohup hive --service hiveserver2 > /usr/local/hive/logs/hiveserver2.log 2>&1 &
+
+# 【停止顺序】
+pkill -f hiveserver2
+pkill -f metastore
+stop-yarn.sh
+stop-dfs.sh
+
+# 【连接测试】
+beeline -u jdbc:hive2://node-master:10000 -n asked
+
+# 【Web 界面】
+# HDFS NameNode:        http://node-master:9870
+# YARN ResourceManager: http://node-master:8088
+# HiveServer2 Web UI:   http://node-master:10002
+# MySQL（无 Web UI）
+
+# 【密码总表】
+# MySQL root         | root | asdfghjkl;'
+# MySQL hive         | hive | asdfghjkl;'
+# Hive Metastore     | hive | asdfghjkl;'
+# PostgreSQL（已停） | hive | asdfghjkl;'
+
+# ============================================
+# 配置完成！
+# Hive 使用 MySQL 8.0.46 作为元数据库
+# 密码统一为：asdfghjkl;'
+# ============================================
+
+# ##############################
+# 09-FINAL 文件结束
+# ##############################
