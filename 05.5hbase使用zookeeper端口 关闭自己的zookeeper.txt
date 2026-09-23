@@ -1,0 +1,190 @@
+echo "=== 配置 HBase 使用自带 ZooKeeper ==="
+
+# 1. 停止 HBase
+/usr/local/hbase/bin/stop-hbase.sh
+sleep 5
+
+# 2. 清理进程
+pkill -9 -f HMaster
+pkill -9 -f HRegionServer
+pkill -9 -f HQuorumPeer
+
+# 3. 修复 HBase 配置，使用自带 ZooKeeper
+cat > /usr/local/hbase/conf/hbase-site.xml << 'EOF'
+<?xml version="1.0"?>
+<configuration>
+  <!-- HDFS 存储路径 -->
+  <property>
+    <name>hbase.rootdir</name>
+    <value>hdfs://node-master:9000/hbase</value>
+  </property>
+  
+  <!-- 分布式模式 -->
+  <property>
+    <name>hbase.cluster.distributed</name>
+    <value>true</value>
+  </property>
+  
+  <!-- HBase 自带 ZooKeeper 配置 -->
+  <property>
+    <name>hbase.zookeeper.quorum</name>
+    <value>node-master,node-slave1,node-slave2</value>
+  </property>
+  
+  <property>
+    <name>hbase.zookeeper.property.dataDir</name>
+    <value>/usr/local/hbase/zookeeper</value>
+  </property>
+  
+  <property>
+    <name>hbase.zookeeper.property.clientPort</name>
+    <value>2181</value>
+  </property>
+  
+  <!-- Web UI 端口 -->
+  <property>
+    <name>hbase.master.info.port</name>
+    <value>16010</value>
+  </property>
+  
+  <!-- 其他优化配置 -->
+  <property>
+    <name>hbase.regionserver.handler.count</name>
+    <value>30</value>
+  </property>
+  
+  <property>
+    <name>hbase.unsafe.stream.capability.enforce</name>
+    <value>false</value>
+  </property>
+</configuration>
+EOF
+
+# 4. 分发配置
+scp /usr/local/hbase/conf/hbase-site.xml asked@node-slave1:/usr/local/hbase/conf/
+scp /usr/local/hbase/conf/hbase-site.xml asked@node-slave2:/usr/local/hbase/conf/
+
+# 5. 清理 HDFS 数据
+hdfs dfs -rm -r /hbase 2>/dev/null
+
+# 6. 启动 HBase
+/usr/local/hbase/bin/start-hbase.sh
+
+sleep 15
+
+echo "✅ HBase 配置完成，使用自带 ZooKeeper"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+echo "=== 分发配置并测试 ==="
+
+# 1. 分发配置到从节点
+echo "1. 分发 HBase 配置到从节点..."
+scp /usr/local/hbase/conf/hbase-site.xml asked@node-slave1:/usr/local/hbase/conf/ 2>/dev/null
+scp /usr/local/hbase/conf/hbase-site.xml asked@node-slave2:/usr/local/hbase/conf/ 2>/dev/null
+
+# 2. 清理 HDFS 中的 HBase 数据
+echo "2. 清理 HDFS 中的 HBase 数据..."
+hdfs dfs -rm -r /hbase 2>/dev/null
+
+# 3. 启动 HBase
+echo "3. 启动 HBase..."
+/usr/local/hbase/bin/start-hbase.sh
+
+sleep 15
+
+# 4. 验证
+echo "4. 验证启动结果..."
+echo "进程状态:"
+jps | grep -E "HMaster|HRegionServer|QuorumPeerMain"
+
+echo ""
+echo "Web UI 测试:"
+curl -s http://localhost:16010 2>/dev/null | grep -q "HBase" && echo "✅ HBase Web UI 可访问" || echo "❌ HBase Web UI 不可访问"
+
+echo ""
+echo "快速 HBase Shell 测试:"
+echo "version" | timeout 8 /usr/local/hbase/bin/hbase shell 2>/dev/null | grep "Version" && echo "✅ HBase Shell 正常" || echo "❌ HBase Shell 异常"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+echo "=== 检查 Kafka 的 ZooKeeper 配置 ==="
+echo ""
+
+# 查看 Kafka 使用的 ZooKeeper 配置
+grep "zookeeper.connect" /usr/local/kafka/config/server.properties
+
+echo ""
+echo "当前 Kafka 使用的 ZooKeeper:"
+/usr/local/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092 2>/dev/null && echo "✅ Kafka 连接 ZooKeeper 成功" || echo "❌ Kafka 连接 ZooKeeper 失败"
